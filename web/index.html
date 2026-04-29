@@ -301,11 +301,18 @@
     let sttLastInterimText = "";
     let sttLastFinalText = "";
     let sttErrorLogged = false;
+    let sttTransport = "browser_text";
+    let sttProviderName = "browser";
+    let sttLanguageCode = "unknown";
+    let sttMediaRecorder = null;
+    let sttMediaRecorderActive = false;
+    let sttAudioChunkSequence = 0;
 
     const SPEAKING_START_THRESHOLD = 0.02;
     const SPEAKING_STOP_THRESHOLD = 0.012;
     const SPEAKING_STOP_HOLD_MS = 900;
     const STT_SOURCE = "browser_web_speech";
+    const STT_AUDIO_CHUNK_MS = 2500;
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     wsUrlInput.value = `${protocol}//${window.location.host}/ws`;
@@ -387,7 +394,110 @@
       );
     }
 
+    function chooseSttAudioMimeType() {
+      if (typeof MediaRecorder === "undefined") {
+        return "";
+      }
+      const candidates = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+        "audio/ogg",
+      ];
+      for (const candidate of candidates) {
+        if (MediaRecorder.isTypeSupported(candidate)) {
+          return candidate;
+        }
+      }
+      return "";
+    }
+
+    function toBase64FromBytes(bytes) {
+      const chunkSize = 0x8000;
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        const chunk = bytes.subarray(offset, offset + chunkSize);
+        binary += String.fromCharCode(...chunk);
+      }
+      return btoa(binary);
+    }
+
+    async function sendSttAudioChunk(blob) {
+      if (
+        !blob ||
+        blob.size <= 0 ||
+        !ws ||
+        ws.readyState !== WebSocket.OPEN ||
+        !currentRoomId ||
+        sttTransport !== "audio_chunk"
+      ) {
+        return;
+      }
+
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioBytes = new Uint8Array(arrayBuffer);
+      if (audioBytes.length === 0) {
+        return;
+      }
+
+      ws.send(
+        JSON.stringify({
+          type: "stt_audio_chunk",
+          audio_base64: toBase64FromBytes(audioBytes),
+          mime_type: blob.type || (sttMediaRecorder ? sttMediaRecorder.mimeType : "") || "audio/webm",
+          language_code: sttLanguageCode,
+          sequence: sttAudioChunkSequence,
+        }),
+      );
+      sttAudioChunkSequence += 1;
+    }
+
+    function startSttAudioCapture(stream) {
+      if (sttTransport !== "audio_chunk" || sttMediaRecorderActive || !stream) {
+        return;
+      }
+      if (typeof MediaRecorder === "undefined") {
+        logEvent("MediaRecorder unavailable; provider STT audio streaming disabled");
+        return;
+      }
+
+      const mimeType = chooseSttAudioMimeType();
+      if (!mimeType) {
+        logEvent("No supported MediaRecorder audio mime type; provider STT disabled");
+        return;
+      }
+
+      sttAudioChunkSequence = 0;
+      sttMediaRecorder = new MediaRecorder(stream, { mimeType });
+      sttMediaRecorder.ondataavailable = (event) => {
+        sendSttAudioChunk(event.data).catch((err) => {
+          logEvent(`STT audio chunk send error: ${err.message}`);
+        });
+      };
+      sttMediaRecorder.onerror = () => {
+        logEvent("STT recorder error");
+      };
+      sttMediaRecorder.start(STT_AUDIO_CHUNK_MS);
+      sttMediaRecorderActive = true;
+      logEvent(`Provider STT capture started (${sttProviderName})`);
+    }
+
+    function stopSttAudioCapture() {
+      if (!sttMediaRecorder) {
+        sttMediaRecorderActive = false;
+        return;
+      }
+      if (sttMediaRecorder.state !== "inactive") {
+        sttMediaRecorder.stop();
+      }
+      sttMediaRecorder = null;
+      sttMediaRecorderActive = false;
+    }
+
     function setupSpeechRecognition() {
+      if (sttTransport !== "browser_text") {
+        return;
+      }
       if (speechRecognition) {
         return;
       }
@@ -463,6 +573,9 @@
     }
 
     function startSpeechRecognition() {
+      if (sttTransport !== "browser_text") {
+        return;
+      }
       speechRecognitionShouldRun = true;
 
       if (!speechRecognition) {
@@ -487,6 +600,9 @@
     function stopSpeechRecognition() {
       speechRecognitionShouldRun = false;
       resetSttState();
+      if (sttTransport !== "browser_text") {
+        return;
+      }
       if (!speechRecognition) {
         return;
       }
@@ -608,8 +724,12 @@
       if (mediaDevices && typeof mediaDevices.getUserMedia === "function") {
         localStream = await mediaDevices.getUserMedia({ audio: true, video: false });
         ensureSpeakingMonitor(localStream);
-        setupSpeechRecognition();
-        startSpeechRecognition();
+        if (sttTransport === "audio_chunk") {
+          startSttAudioCapture(localStream);
+        } else {
+          setupSpeechRecognition();
+          startSpeechRecognition();
+        }
         logEvent("Microphone stream acquired");
         return localStream;
       }
@@ -628,8 +748,12 @@
           );
         });
         ensureSpeakingMonitor(localStream);
-        setupSpeechRecognition();
-        startSpeechRecognition();
+        if (sttTransport === "audio_chunk") {
+          startSttAudioCapture(localStream);
+        } else {
+          setupSpeechRecognition();
+          startSpeechRecognition();
+        }
         logEvent("Microphone stream acquired (legacy API)");
         return localStream;
       }
@@ -805,8 +929,19 @@
       if (message.type === "connected") {
         selfId = message.participant_id;
         selfIdEl.textContent = selfId;
+        const sttConfig = message.stt || {};
+        if (typeof sttConfig.transport === "string" && sttConfig.transport) {
+          sttTransport = sttConfig.transport;
+        }
+        if (typeof sttConfig.provider === "string" && sttConfig.provider) {
+          sttProviderName = sttConfig.provider;
+        }
+        if (typeof sttConfig.default_language_code === "string" && sttConfig.default_language_code) {
+          sttLanguageCode = sttConfig.default_language_code;
+        }
         upsertParticipant({ participant_id: selfId, name: nameInput.value, role: "local", is_speaking: false });
         logEvent(`Connected with self id ${selfId}`);
+        logEvent(`STT mode: ${sttTransport} (${sttProviderName})`);
         return;
       }
 
@@ -822,7 +957,11 @@
           upsertParticipant(participant);
         }
         logEvent(`Joined room ${currentRoomId}`);
-        startSpeechRecognition();
+        if (sttTransport === "audio_chunk") {
+          startSttAudioCapture(localStream);
+        } else {
+          startSpeechRecognition();
+        }
         return;
       }
 
@@ -830,6 +969,7 @@
         const previousRoomId = message.room_id;
         setLocalSpeaking(false, { silentLog: true });
         stopSpeechRecognition();
+        stopSttAudioCapture();
         currentRoomId = null;
         currentRoomEl.textContent = "-";
         closeAllPeers();
@@ -922,6 +1062,7 @@
         setWsState(false);
         setLocalSpeaking(false, { silentLog: true });
         stopSpeechRecognition();
+        stopSttAudioCapture();
         currentRoomId = null;
         currentRoomEl.textContent = "-";
         logEvent("WebSocket closed");
@@ -961,6 +1102,7 @@
         setLocalSpeaking(false, { silentLog: true });
       }
       stopSpeechRecognition();
+      stopSttAudioCapture();
       send({ type: "leave_room" });
     }
 
@@ -971,6 +1113,7 @@
     document.getElementById("leaveBtn").addEventListener("click", leaveRoom);
     window.addEventListener("beforeunload", () => {
       stopSpeechRecognition();
+      stopSttAudioCapture();
       stopSpeakingMonitor();
     });
 

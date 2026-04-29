@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from services.stt_providers import BaseSTTProvider, STTProviderError
+
 
 class STTServiceError(ValueError):
     """Raised when an STT transcript payload is invalid."""
@@ -23,9 +25,22 @@ class STTService:
 
     DEFAULT_SOURCE = "browser_web_speech"
 
-    def __init__(self, max_transcript_chars: int = 400) -> None:
+    def __init__(
+        self,
+        max_transcript_chars: int = 400,
+        provider: BaseSTTProvider | None = None,
+    ) -> None:
         self._max_transcript_chars = max(32, max_transcript_chars)
         self._last_transcript_state_by_participant: dict[str, tuple[str, bool]] = {}
+        self._provider = provider
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider.name if self._provider else "browser"
+
+    @property
+    def uses_audio_provider(self) -> bool:
+        return self._provider is not None
 
     def normalize_update(
         self,
@@ -69,6 +84,40 @@ class STTService:
 
     def clear_participant(self, participant_id: str) -> None:
         self._last_transcript_state_by_participant.pop(participant_id, None)
+
+    async def transcribe_audio_chunk(
+        self,
+        *,
+        participant_id: str,
+        audio_bytes: bytes,
+        mime_type: str,
+        language_code: str,
+    ) -> TranscriptUpdate | None:
+        if self._provider is None:
+            return None
+        if not isinstance(audio_bytes, bytes):
+            raise STTServiceError("audio_bytes must be bytes")
+        if not audio_bytes:
+            return None
+
+        try:
+            provider_result = await self._provider.transcribe_chunk(
+                audio_bytes=audio_bytes,
+                mime_type=mime_type,
+                language_code=language_code,
+            )
+        except STTProviderError as exc:
+            raise STTServiceError(str(exc)) from exc
+
+        if provider_result is None:
+            return None
+
+        return self.normalize_update(
+            participant_id=participant_id,
+            text=provider_result.text,
+            is_final=provider_result.is_final,
+            source=provider_result.source,
+        )
 
     def _normalize_source(self, source: Any) -> str:
         if isinstance(source, str):

@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import unittest
 
 import signaling.server as signaling_server
 from services.stt_service import STTService
+from services.stt_providers import ProviderTranscript
 from transport.webrtc.manager import RoomManager
 
 
@@ -12,6 +14,25 @@ class FakeWebSocket:
 
     async def send_json(self, payload: dict) -> None:
         self.messages.append(payload)
+
+
+class FakeAudioProvider:
+    name = "fake-provider"
+
+    async def transcribe_chunk(
+        self,
+        *,
+        audio_bytes: bytes,
+        mime_type: str,
+        language_code: str,
+    ) -> ProviderTranscript | None:
+        if not audio_bytes:
+            return None
+        return ProviderTranscript(
+            text=f"chunk-{len(audio_bytes)}-{mime_type.split(';', 1)[0]}-{language_code}",
+            is_final=True,
+            source=self.name,
+        )
 
 
 class SignalingServerTests(unittest.IsolatedAsyncioTestCase):
@@ -206,6 +227,57 @@ class SignalingServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ws.messages[-1]["type"], "error")
         self.assertEqual(ws.messages[-1]["code"], "invalid_stt_payload")
+
+    async def test_stt_audio_chunk_broadcasts_transcript_event(self) -> None:
+        signaling_server.stt_service = STTService(provider=FakeAudioProvider())
+        ws_alice = FakeWebSocket()
+        ws_bob = FakeWebSocket()
+        alice = signaling_server.manager.register_participant(ws_alice, name="Alice")
+        bob = signaling_server.manager.register_participant(ws_bob, name="Bob")
+
+        await signaling_server._handle_message(alice, {"type": "join_room", "room_id": "room-stt-audio"})
+        await signaling_server._handle_message(bob, {"type": "join_room", "room_id": "room-stt-audio"})
+        ws_alice.messages.clear()
+        ws_bob.messages.clear()
+
+        payload = {
+            "type": "stt_audio_chunk",
+            "audio_base64": base64.b64encode(b"abc123").decode("ascii"),
+            "mime_type": "audio/webm;codecs=opus",
+            "language_code": "en-IN",
+        }
+        await signaling_server._handle_message(alice, payload)
+        await asyncio.sleep(0)
+
+        self.assertTrue(ws_bob.messages)
+        event = ws_bob.messages[-1]
+        self.assertEqual(event["type"], "room_event")
+        self.assertEqual(event["event"]["event_type"], "participant_transcript")
+        self.assertEqual(event["event"]["participant_id"], alice.participant_id)
+        self.assertEqual(event["event"]["transcript_source"], "fake-provider")
+        self.assertEqual(event["event"]["transcript_text"], "chunk-6-audio/webm-en-IN")
+
+    async def test_stt_audio_chunk_rejects_invalid_base64(self) -> None:
+        signaling_server.stt_service = STTService(provider=FakeAudioProvider())
+        ws = FakeWebSocket()
+        participant = signaling_server.manager.register_participant(ws, name="Alice")
+        await signaling_server._handle_message(
+            participant,
+            {"type": "join_room", "room_id": "room-stt-audio-error"},
+        )
+        ws.messages.clear()
+
+        await signaling_server._handle_message(
+            participant,
+            {
+                "type": "stt_audio_chunk",
+                "audio_base64": "###invalid###",
+                "mime_type": "audio/webm",
+            },
+        )
+
+        self.assertEqual(ws.messages[-1]["type"], "error")
+        self.assertEqual(ws.messages[-1]["code"], "invalid_stt_audio_chunk")
 
 
 if __name__ == "__main__":

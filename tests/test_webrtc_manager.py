@@ -1,8 +1,8 @@
 import asyncio
 import unittest
 
-from transport.webrtc.manager import RoomEventType, RoomManager
-from transport.webrtc.participants.base import ParticipantRole, ParticipantState
+from participants.base import ParticipantRole, ParticipantState
+from room.manager import RoomEventType, RoomManager
 
 
 class RoomManagerTests(unittest.TestCase):

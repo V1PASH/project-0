@@ -1,11 +1,16 @@
 import asyncio
 import base64
+import json
+import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import signaling.server as signaling_server
-from services.stt_service import STTService
+from room.control import RoomControlModule
+from room.manager import RoomManager
 from services.stt_providers import ProviderTranscript
-from transport.webrtc.manager import RoomManager
+from services.stt_service import STTService
 
 
 class FakeWebSocket:
@@ -38,7 +43,31 @@ class FakeAudioProvider:
 class SignalingServerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         signaling_server.manager = RoomManager()
+        signaling_server.room_control = RoomControlModule(signaling_server.manager)
         signaling_server.stt_service = STTService()
+        signaling_server.ROOM_CREATE_API_KEY = ""
+        signaling_server.ROOM_CREATE_API_SECRET = ""
+        signaling_server.ROOM_CREATE_TOKEN_TTL_SECONDS = 300
+        signaling_server.REQUIRE_CREATE_ROOM_AUTH = False
+        signaling_server.REQUIRE_EXPLICIT_ROOM_CREATE = False
+
+    async def test_index_returns_404_when_no_index_is_available(self) -> None:
+        original_web_root = signaling_server.WEB_ROOT
+        signaling_server.WEB_ROOT = Path("/tmp/rtc-room-framework-missing-web-root")
+        try:
+            with patch("signaling.server._load_packaged_index_html", return_value=None):
+                response = await signaling_server.index()
+        finally:
+            signaling_server.WEB_ROOT = original_web_root
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            json.loads(response.body),
+            {
+                "error": "index_not_found",
+                "message": "No index.html found in web root or packaged assets",
+            },
+        )
 
     async def test_join_room_and_leave_room_flow(self) -> None:
         ws = FakeWebSocket()
@@ -55,6 +84,166 @@ class SignalingServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.messages[1]["type"], "left_room")
         self.assertEqual(ws.messages[1]["room_id"], "room-a")
         self.assertTrue(ws.messages[1]["room_deleted"])
+
+    async def test_create_room_marks_room_as_created(self) -> None:
+        ws = FakeWebSocket()
+        participant = signaling_server.manager.register_participant(ws, name="Alice")
+
+        await signaling_server._handle_message(
+            participant,
+            {"type": "create_room", "room_id": "sdk-room", "name": "Alice"},
+        )
+
+        self.assertEqual(ws.messages[0]["type"], "joined_room")
+        self.assertEqual(ws.messages[0]["room"]["room_id"], "sdk-room")
+        self.assertTrue(ws.messages[0]["room_created"])
+        self.assertEqual(ws.messages[0]["join_source"], "create_room")
+
+    async def test_create_room_rejects_existing_room_name(self) -> None:
+        ws_alice = FakeWebSocket()
+        ws_bob = FakeWebSocket()
+        alice = signaling_server.manager.register_participant(ws_alice, name="Alice")
+        bob = signaling_server.manager.register_participant(ws_bob, name="Bob")
+
+        await signaling_server._handle_message(
+            alice,
+            {"type": "create_room", "room_id": "same-room", "name": "Alice"},
+        )
+        await signaling_server._handle_message(
+            bob,
+            {"type": "create_room", "room_id": "same-room", "name": "Bob"},
+        )
+
+        self.assertEqual(ws_bob.messages[-1]["type"], "error")
+        self.assertEqual(ws_bob.messages[-1]["code"], "room_already_exists")
+
+    async def test_create_room_requires_auth_when_enabled(self) -> None:
+        ws = FakeWebSocket()
+        participant = signaling_server.manager.register_participant(ws, name="Alice")
+        signaling_server.ROOM_CREATE_API_KEY = "room-key"
+        signaling_server.ROOM_CREATE_API_SECRET = "room-secret"
+        signaling_server.REQUIRE_CREATE_ROOM_AUTH = True
+
+        await signaling_server._handle_message(
+            participant,
+            {"type": "create_room", "room_id": "secure-room", "name": "Alice"},
+        )
+        self.assertEqual(ws.messages[-1]["type"], "error")
+        self.assertEqual(ws.messages[-1]["code"], "invalid_create_room_auth")
+
+    async def test_create_room_rejects_invalid_auth_token(self) -> None:
+        ws = FakeWebSocket()
+        participant = signaling_server.manager.register_participant(ws, name="Alice")
+        signaling_server.ROOM_CREATE_API_KEY = "room-key"
+        signaling_server.ROOM_CREATE_API_SECRET = "room-secret"
+        signaling_server.REQUIRE_CREATE_ROOM_AUTH = True
+        api_ts = 1_700_000_000
+        valid_token = signaling_server._build_create_room_token(
+            api_key="room-key",
+            api_secret="room-secret",
+            room_id="secure-room",
+            api_ts=api_ts,
+        )
+
+        await signaling_server._handle_message(
+            participant,
+            {
+                "type": "create_room",
+                "room_id": "secure-room",
+                "api_key": "wrong-key",
+                "api_token": valid_token,
+                "api_ts": api_ts,
+            },
+        )
+        self.assertEqual(ws.messages[-1]["type"], "error")
+        self.assertEqual(ws.messages[-1]["code"], "unauthorized_create_room")
+
+    async def test_create_room_rejects_expired_auth_token(self) -> None:
+        ws = FakeWebSocket()
+        participant = signaling_server.manager.register_participant(ws, name="Alice")
+        signaling_server.ROOM_CREATE_API_KEY = "room-key"
+        signaling_server.ROOM_CREATE_API_SECRET = "room-secret"
+        signaling_server.REQUIRE_CREATE_ROOM_AUTH = True
+        signaling_server.ROOM_CREATE_TOKEN_TTL_SECONDS = 60
+        api_ts = int(time.time()) - 10_000
+        token = signaling_server._build_create_room_token(
+            api_key="room-key",
+            api_secret="room-secret",
+            room_id="secure-room",
+            api_ts=api_ts,
+        )
+
+        await signaling_server._handle_message(
+            participant,
+            {
+                "type": "create_room",
+                "room_id": "secure-room",
+                "api_key": "room-key",
+                "api_token": token,
+                "api_ts": api_ts,
+            },
+        )
+        self.assertEqual(ws.messages[-1]["type"], "error")
+        self.assertEqual(ws.messages[-1]["code"], "expired_create_room_token")
+
+    async def test_create_room_accepts_valid_auth_token(self) -> None:
+        ws = FakeWebSocket()
+        participant = signaling_server.manager.register_participant(ws, name="Alice")
+        signaling_server.ROOM_CREATE_API_KEY = "room-key"
+        signaling_server.ROOM_CREATE_API_SECRET = "room-secret"
+        signaling_server.REQUIRE_CREATE_ROOM_AUTH = True
+        api_ts = int(time.time())
+        token = signaling_server._build_create_room_token(
+            api_key="room-key",
+            api_secret="room-secret",
+            room_id="secure-room",
+            api_ts=api_ts,
+        )
+
+        await signaling_server._handle_message(
+            participant,
+            {
+                "type": "create_room",
+                "room_id": "secure-room",
+                "api_key": "room-key",
+                "api_token": token,
+                "api_ts": api_ts,
+            },
+        )
+
+        self.assertEqual(ws.messages[-1]["type"], "joined_room")
+        self.assertTrue(ws.messages[-1]["room_created"])
+
+    async def test_join_room_returns_room_full_error(self) -> None:
+        ws_alice = FakeWebSocket()
+        ws_bob = FakeWebSocket()
+        alice = signaling_server.manager.register_participant(ws_alice, name="Alice")
+        bob = signaling_server.manager.register_participant(ws_bob, name="Bob")
+
+        await signaling_server._handle_message(
+            alice,
+            {"type": "create_room", "room_id": "tiny-room", "max_participants": 1},
+        )
+        await signaling_server._handle_message(
+            bob,
+            {"type": "join_room", "room_id": "tiny-room"},
+        )
+
+        self.assertEqual(ws_bob.messages[-1]["type"], "error")
+        self.assertEqual(ws_bob.messages[-1]["code"], "room_full")
+
+    async def test_join_room_requires_existing_when_explicit_create_enabled(self) -> None:
+        ws = FakeWebSocket()
+        participant = signaling_server.manager.register_participant(ws, name="Alice")
+        signaling_server.REQUIRE_EXPLICIT_ROOM_CREATE = True
+
+        await signaling_server._handle_message(
+            participant,
+            {"type": "join_room", "room_id": "must-create-first"},
+        )
+
+        self.assertEqual(ws.messages[-1]["type"], "error")
+        self.assertEqual(ws.messages[-1]["code"], "room_not_found")
 
     async def test_relays_webrtc_offer_between_participants(self) -> None:
         ws_alice = FakeWebSocket()
@@ -278,6 +467,58 @@ class SignalingServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ws.messages[-1]["type"], "error")
         self.assertEqual(ws.messages[-1]["code"], "invalid_stt_audio_chunk")
+
+    async def test_publish_audio_broadcasts_to_other_participants(self) -> None:
+        ws_alice = FakeWebSocket()
+        ws_bob = FakeWebSocket()
+        alice = signaling_server.manager.register_participant(ws_alice, name="Alice")
+        bob = signaling_server.manager.register_participant(ws_bob, name="Bob")
+        await signaling_server._handle_message(
+            alice, {"type": "join_room", "room_id": "audio-room", "name": "Alice"}
+        )
+        await signaling_server._handle_message(
+            bob, {"type": "join_room", "room_id": "audio-room", "name": "Bob"}
+        )
+        await asyncio.sleep(0)
+        ws_alice.messages.clear()
+        ws_bob.messages.clear()
+
+        audio_bytes = b"\x01\x02\x03\x04"
+        await signaling_server._handle_message(
+            alice,
+            {
+                "type": "publish_audio",
+                "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+                "mime_type": "audio/pcm",
+                "sequence": 3,
+            },
+        )
+        await asyncio.sleep(0)
+
+        self.assertEqual(ws_alice.messages[-1]["type"], "audio_published")
+        self.assertEqual(ws_alice.messages[-1]["audio_bytes"], len(audio_bytes))
+
+        self.assertEqual(ws_bob.messages[-1]["type"], "room_audio")
+        self.assertEqual(ws_bob.messages[-1]["from_participant_id"], alice.participant_id)
+        self.assertEqual(ws_bob.messages[-1]["room_id"], "audio-room")
+        self.assertEqual(ws_bob.messages[-1]["sequence"], 3)
+        self.assertEqual(ws_bob.messages[-1]["audio_bytes"], len(audio_bytes))
+        self.assertEqual(ws_bob.messages[-1]["audio_base64"], base64.b64encode(audio_bytes).decode("ascii"))
+
+    async def test_publish_audio_requires_room_membership(self) -> None:
+        ws = FakeWebSocket()
+        participant = signaling_server.manager.register_participant(ws, name="Alice")
+
+        await signaling_server._handle_message(
+            participant,
+            {
+                "type": "publish_audio",
+                "audio_base64": base64.b64encode(b"abc").decode("ascii"),
+            },
+        )
+
+        self.assertEqual(ws.messages[-1]["type"], "error")
+        self.assertEqual(ws.messages[-1]["code"], "not_in_room")
 
 
 if __name__ == "__main__":

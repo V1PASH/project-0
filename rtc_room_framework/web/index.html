@@ -1,0 +1,1126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebRTC Room Test</title>
+  <style>
+    :root {
+      --bg: #f6f4ef;
+      --panel: #fffdf6;
+      --text: #1e2124;
+      --accent: #d85f38;
+      --accent-2: #2f6f74;
+      --line: #ded8ca;
+      --ok: #2e7d32;
+      --warn: #8d6e63;
+      --error: #b71c1c;
+      --mono: "IBM Plex Mono", "Menlo", "Consolas", monospace;
+      --sans: "Work Sans", "Segoe UI", sans-serif;
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% 10%, #f5c89f 0%, transparent 30%),
+        radial-gradient(circle at 90% 15%, #98c8ca 0%, transparent 25%),
+        var(--bg);
+      min-height: 100vh;
+    }
+
+    .shell {
+      max-width: 980px;
+      margin: 24px auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+    }
+
+    .header {
+      padding: 20px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(120deg, rgba(216, 95, 56, 0.08), rgba(47, 111, 116, 0.08));
+    }
+
+    .header h1 {
+      margin: 0 0 8px;
+      font-size: 1.2rem;
+      letter-spacing: 0.02em;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 0;
+    }
+
+    .panel {
+      padding: 16px 20px 20px;
+      border-right: 1px solid var(--line);
+    }
+
+    .panel:last-child {
+      border-right: 0;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      margin-bottom: 5px;
+      color: #4d5157;
+    }
+
+    input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 10px;
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      background: #fff;
+      box-sizing: border-box;
+    }
+
+    .buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+      margin-bottom: 12px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 9px 12px;
+      cursor: pointer;
+      color: #fff;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+
+    .btn-connect { background: var(--accent-2); }
+    .btn-join { background: var(--accent); }
+    .btn-leave { background: var(--warn); }
+
+    .status {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.88rem;
+      margin-bottom: 12px;
+      background: #fff;
+    }
+
+    .status .ok { color: var(--ok); font-weight: 700; }
+    .status .bad { color: var(--error); font-weight: 700; }
+
+    .block {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+
+    .block h2 {
+      margin: 0;
+      padding: 10px 12px;
+      font-size: 0.85rem;
+      border-bottom: 1px solid var(--line);
+      background: #faf7ef;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .list {
+      margin: 0;
+      padding: 10px 12px;
+      list-style: none;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      max-height: 160px;
+      overflow: auto;
+    }
+
+    .list li {
+      padding: 4px 0;
+      border-bottom: 1px dashed #ece8de;
+    }
+
+    .list li:last-child {
+      border-bottom: 0;
+    }
+
+    #eventLog {
+      max-height: 300px;
+    }
+
+    .hint {
+      margin-top: 10px;
+      font-size: 0.82rem;
+      color: #5b6067;
+      line-height: 1.35;
+    }
+
+    @media (max-width: 860px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+      .panel {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .panel:last-child {
+        border-bottom: 0;
+      }
+      .row {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <h1>WebRTC Voice Room Test</h1>
+      <div>Open this page in two tabs, use same room ID, and allow microphone access.</div>
+    </header>
+
+    <section class="grid">
+      <section class="panel">
+        <div class="row">
+          <div>
+            <label for="wsUrl">WebSocket URL</label>
+            <input id="wsUrl" />
+          </div>
+          <div>
+            <label for="name">Your Name</label>
+            <input id="name" value="User" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="roomId">Room ID</label>
+            <input id="roomId" value="room-1" />
+          </div>
+          <div>
+            <label for="maxParticipants">Max Participants</label>
+            <input id="maxParticipants" value="10" />
+          </div>
+        </div>
+
+        <div class="buttons">
+          <button class="btn-connect" id="connectBtn">Connect</button>
+          <button class="btn-join" id="joinBtn">Join Room</button>
+          <button class="btn-leave" id="leaveBtn">Leave Room</button>
+        </div>
+
+        <div class="status" id="statusBox">
+          WS: <span id="wsState" class="bad">DISCONNECTED</span><br />
+          Self ID: <code id="selfId">-</code><br />
+          Room: <code id="currentRoom">-</code>
+        </div>
+
+        <div class="block">
+          <h2>Participants</h2>
+          <ul class="list" id="participantsList"></ul>
+        </div>
+
+        <div class="hint">
+          Existing participants automatically create an offer for new joiners. Audio is sent with microphone stream only.
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="block">
+          <h2>Events</h2>
+          <ul class="list" id="eventLog"></ul>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const CLIENT_VERSION = "2026-04-29-1";
+
+    function normalizeWildcardLocalhost() {
+      const wildcardHosts = new Set(["0.0.0.0", "::"]);
+      if (!wildcardHosts.has(window.location.hostname)) {
+        return;
+      }
+
+      const nextOrigin = `${window.location.protocol}//localhost${window.location.port ? `:${window.location.port}` : ""}`;
+      const nextUrl = `${nextOrigin}${window.location.pathname}${window.location.search}${window.location.hash}`;
+      window.location.replace(nextUrl);
+    }
+
+    normalizeWildcardLocalhost();
+
+    const wsUrlInput = document.getElementById("wsUrl");
+    const nameInput = document.getElementById("name");
+    const roomIdInput = document.getElementById("roomId");
+    const maxParticipantsInput = document.getElementById("maxParticipants");
+    const wsStateEl = document.getElementById("wsState");
+    const selfIdEl = document.getElementById("selfId");
+    const currentRoomEl = document.getElementById("currentRoom");
+    const participantsList = document.getElementById("participantsList");
+    const eventLog = document.getElementById("eventLog");
+
+    const participants = new Map();
+    const peers = new Map();
+    const queuedIce = new Map();
+
+    let ws = null;
+    let localStream = null;
+    let selfId = null;
+    let currentRoomId = null;
+    let localSpeaking = false;
+    let speakingAudioContext = null;
+    let speakingAnalyser = null;
+    let speakingData = null;
+    let speakingLoopHandle = null;
+    let lastVoiceDetectedAt = 0;
+    let speechRecognition = null;
+    let speechRecognitionSupported = false;
+    let speechRecognitionRunning = false;
+    let speechRecognitionShouldRun = false;
+    let sttLastInterimText = "";
+    let sttLastFinalText = "";
+    let sttErrorLogged = false;
+    let sttTransport = "browser_text";
+    let sttProviderName = "browser";
+    let sttLanguageCode = "unknown";
+    let sttMediaRecorder = null;
+    let sttMediaRecorderActive = false;
+    let sttAudioChunkSequence = 0;
+
+    const SPEAKING_START_THRESHOLD = 0.02;
+    const SPEAKING_STOP_THRESHOLD = 0.012;
+    const SPEAKING_STOP_HOLD_MS = 900;
+    const STT_SOURCE = "browser_web_speech";
+    const STT_AUDIO_CHUNK_MS = 2500;
+
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    wsUrlInput.value = `${protocol}//${window.location.host}/ws`;
+
+    function logEvent(message) {
+      const li = document.createElement("li");
+      li.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      eventLog.prepend(li);
+    }
+
+    function getMediaSupportSummary() {
+      const mediaDevices = navigator.mediaDevices;
+      const modern = !!(mediaDevices && typeof mediaDevices.getUserMedia === "function");
+      const legacy = !!(
+        navigator.getUserMedia ||
+        navigator.webkitGetUserMedia ||
+        navigator.mozGetUserMedia
+      );
+      const topLevel = window.top === window;
+      return {
+        modern,
+        legacy,
+        secure: window.isSecureContext,
+        origin: window.location.origin,
+        topLevel,
+      };
+    }
+
+    function setWsState(open) {
+      wsStateEl.textContent = open ? "CONNECTED" : "DISCONNECTED";
+      wsStateEl.className = open ? "ok" : "bad";
+    }
+
+    function renderParticipants() {
+      participantsList.innerHTML = "";
+      for (const [id, meta] of participants.entries()) {
+        const li = document.createElement("li");
+        const speakingState = meta.is_speaking ? " | speaking" : "";
+        li.textContent = `${meta.name || "Unknown"} (${meta.role || "participant"}${speakingState}) - ${id}`;
+        participantsList.appendChild(li);
+      }
+    }
+
+    function setParticipantSpeaking(participantId, speaking) {
+      const existing = participants.get(participantId);
+      if (!existing) {
+        return;
+      }
+      existing.is_speaking = Boolean(speaking);
+      participants.set(participantId, existing);
+      renderParticipants();
+    }
+
+    function sendParticipantActivity(activity) {
+      if (!ws || ws.readyState !== WebSocket.OPEN || !currentRoomId) {
+        return;
+      }
+      ws.send(JSON.stringify({ type: "participant_activity", activity }));
+    }
+
+    function resetSttState() {
+      sttLastInterimText = "";
+      sttLastFinalText = "";
+    }
+
+    function sendSttTranscript(text, isFinal) {
+      const normalizedText = typeof text === "string" ? text.trim() : "";
+      if (!normalizedText || !ws || ws.readyState !== WebSocket.OPEN || !currentRoomId) {
+        return;
+      }
+
+      ws.send(
+        JSON.stringify({
+          type: "stt_transcript",
+          text: normalizedText,
+          is_final: Boolean(isFinal),
+          source: STT_SOURCE,
+        }),
+      );
+    }
+
+    function chooseSttAudioMimeType() {
+      if (typeof MediaRecorder === "undefined") {
+        return "";
+      }
+      const candidates = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+        "audio/ogg",
+      ];
+      for (const candidate of candidates) {
+        if (MediaRecorder.isTypeSupported(candidate)) {
+          return candidate;
+        }
+      }
+      return "";
+    }
+
+    function toBase64FromBytes(bytes) {
+      const chunkSize = 0x8000;
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        const chunk = bytes.subarray(offset, offset + chunkSize);
+        binary += String.fromCharCode(...chunk);
+      }
+      return btoa(binary);
+    }
+
+    async function sendSttAudioChunk(blob) {
+      if (
+        !blob ||
+        blob.size <= 0 ||
+        !ws ||
+        ws.readyState !== WebSocket.OPEN ||
+        !currentRoomId ||
+        sttTransport !== "audio_chunk"
+      ) {
+        return;
+      }
+
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioBytes = new Uint8Array(arrayBuffer);
+      if (audioBytes.length === 0) {
+        return;
+      }
+
+      ws.send(
+        JSON.stringify({
+          type: "stt_audio_chunk",
+          audio_base64: toBase64FromBytes(audioBytes),
+          mime_type: blob.type || (sttMediaRecorder ? sttMediaRecorder.mimeType : "") || "audio/webm",
+          language_code: sttLanguageCode,
+          sequence: sttAudioChunkSequence,
+        }),
+      );
+      sttAudioChunkSequence += 1;
+    }
+
+    function startSttAudioCapture(stream) {
+      if (sttTransport !== "audio_chunk" || sttMediaRecorderActive || !stream) {
+        return;
+      }
+      if (typeof MediaRecorder === "undefined") {
+        logEvent("MediaRecorder unavailable; provider STT audio streaming disabled");
+        return;
+      }
+
+      const mimeType = chooseSttAudioMimeType();
+      if (!mimeType) {
+        logEvent("No supported MediaRecorder audio mime type; provider STT disabled");
+        return;
+      }
+
+      sttAudioChunkSequence = 0;
+      sttMediaRecorder = new MediaRecorder(stream, { mimeType });
+      sttMediaRecorder.ondataavailable = (event) => {
+        sendSttAudioChunk(event.data).catch((err) => {
+          logEvent(`STT audio chunk send error: ${err.message}`);
+        });
+      };
+      sttMediaRecorder.onerror = () => {
+        logEvent("STT recorder error");
+      };
+      sttMediaRecorder.start(STT_AUDIO_CHUNK_MS);
+      sttMediaRecorderActive = true;
+      logEvent(`Provider STT capture started (${sttProviderName})`);
+    }
+
+    function stopSttAudioCapture() {
+      if (!sttMediaRecorder) {
+        sttMediaRecorderActive = false;
+        return;
+      }
+      if (sttMediaRecorder.state !== "inactive") {
+        sttMediaRecorder.stop();
+      }
+      sttMediaRecorder = null;
+      sttMediaRecorderActive = false;
+    }
+
+    function setupSpeechRecognition() {
+      if (sttTransport !== "browser_text") {
+        return;
+      }
+      if (speechRecognition) {
+        return;
+      }
+
+      const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognitionCtor) {
+        if (!sttErrorLogged) {
+          logEvent("STT not supported in this browser; transcript events disabled");
+          sttErrorLogged = true;
+        }
+        return;
+      }
+
+      speechRecognition = new SpeechRecognitionCtor();
+      speechRecognition.continuous = true;
+      speechRecognition.interimResults = true;
+      speechRecognition.maxAlternatives = 1;
+      speechRecognition.lang = "en-US";
+      speechRecognitionSupported = true;
+
+      speechRecognition.onstart = () => {
+        speechRecognitionRunning = true;
+      };
+
+      speechRecognition.onend = () => {
+        speechRecognitionRunning = false;
+        if (speechRecognitionShouldRun && currentRoomId && ws && ws.readyState === WebSocket.OPEN) {
+          startSpeechRecognition();
+        }
+      };
+
+      speechRecognition.onerror = (event) => {
+        if (!event || !event.error) {
+          return;
+        }
+        logEvent(`STT error: ${event.error}`);
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          speechRecognitionSupported = false;
+          stopSpeechRecognition();
+        }
+      };
+
+      speechRecognition.onresult = (event) => {
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+          const result = event.results[i];
+          if (!result || !result[0]) {
+            continue;
+          }
+
+          const transcript = result[0].transcript.trim();
+          if (!transcript) {
+            continue;
+          }
+
+          if (result.isFinal) {
+            if (transcript === sttLastFinalText) {
+              continue;
+            }
+            sttLastFinalText = transcript;
+            sttLastInterimText = "";
+            sendSttTranscript(transcript, true);
+            logEvent(`You said: ${transcript}`);
+            continue;
+          }
+
+          if (transcript === sttLastInterimText) {
+            continue;
+          }
+          sttLastInterimText = transcript;
+          sendSttTranscript(transcript, false);
+        }
+      };
+    }
+
+    function startSpeechRecognition() {
+      if (sttTransport !== "browser_text") {
+        return;
+      }
+      speechRecognitionShouldRun = true;
+
+      if (!speechRecognition) {
+        setupSpeechRecognition();
+      }
+      if (!speechRecognitionSupported) {
+        return;
+      }
+      if (!speechRecognition || speechRecognitionRunning || !currentRoomId) {
+        return;
+      }
+
+      try {
+        speechRecognition.start();
+      } catch (err) {
+        if (err && err.name !== "InvalidStateError") {
+          logEvent(`STT start error: ${err.message}`);
+        }
+      }
+    }
+
+    function stopSpeechRecognition() {
+      speechRecognitionShouldRun = false;
+      resetSttState();
+      if (sttTransport !== "browser_text") {
+        return;
+      }
+      if (!speechRecognition) {
+        return;
+      }
+      if (!speechRecognitionRunning) {
+        return;
+      }
+      try {
+        speechRecognition.stop();
+      } catch (err) {
+        if (err && err.name !== "InvalidStateError") {
+          logEvent(`STT stop error: ${err.message}`);
+        }
+      }
+      speechRecognitionRunning = false;
+    }
+
+    function setLocalSpeaking(speaking, options = {}) {
+      const normalized = Boolean(speaking);
+      if (localSpeaking === normalized) {
+        return;
+      }
+
+      localSpeaking = normalized;
+      if (selfId) {
+        setParticipantSpeaking(selfId, normalized);
+      }
+
+      if (currentRoomId) {
+        sendParticipantActivity(normalized ? "speaking_started" : "speaking_stopped");
+      }
+
+      if (!options.silentLog && currentRoomId) {
+        logEvent(normalized ? "You started speaking" : "You stopped speaking");
+      }
+    }
+
+    function stopSpeakingMonitor() {
+      if (speakingLoopHandle !== null) {
+        cancelAnimationFrame(speakingLoopHandle);
+        speakingLoopHandle = null;
+      }
+
+      if (speakingAudioContext) {
+        speakingAudioContext.close().catch(() => {});
+      }
+      speakingAudioContext = null;
+      speakingAnalyser = null;
+      speakingData = null;
+      lastVoiceDetectedAt = 0;
+    }
+
+    function ensureSpeakingMonitor(stream) {
+      if (speakingLoopHandle !== null || !stream) {
+        return;
+      }
+
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextCtor) {
+        logEvent("AudioContext not available; speaking events disabled");
+        return;
+      }
+
+      speakingAudioContext = new AudioContextCtor();
+      const source = speakingAudioContext.createMediaStreamSource(stream);
+      speakingAnalyser = speakingAudioContext.createAnalyser();
+      speakingAnalyser.fftSize = 1024;
+      source.connect(speakingAnalyser);
+      speakingData = new Uint8Array(speakingAnalyser.fftSize);
+      lastVoiceDetectedAt = performance.now();
+
+      const tick = () => {
+        if (!speakingAnalyser || !speakingData) {
+          speakingLoopHandle = null;
+          return;
+        }
+
+        if (!currentRoomId) {
+          if (localSpeaking) {
+            setLocalSpeaking(false, { silentLog: true });
+          }
+          speakingLoopHandle = requestAnimationFrame(tick);
+          return;
+        }
+
+        speakingAnalyser.getByteTimeDomainData(speakingData);
+        let sumSquares = 0;
+        for (let i = 0; i < speakingData.length; i += 1) {
+          const normalized = (speakingData[i] - 128) / 128;
+          sumSquares += normalized * normalized;
+        }
+        const rms = Math.sqrt(sumSquares / speakingData.length);
+        const now = performance.now();
+
+        if (!localSpeaking) {
+          if (rms >= SPEAKING_START_THRESHOLD) {
+            lastVoiceDetectedAt = now;
+            setLocalSpeaking(true);
+          }
+        } else {
+          if (rms >= SPEAKING_STOP_THRESHOLD) {
+            lastVoiceDetectedAt = now;
+          } else if (now - lastVoiceDetectedAt >= SPEAKING_STOP_HOLD_MS) {
+            setLocalSpeaking(false);
+          }
+        }
+
+        speakingLoopHandle = requestAnimationFrame(tick);
+      };
+
+      speakingLoopHandle = requestAnimationFrame(tick);
+    }
+
+    async function ensureLocalStream() {
+      if (localStream) {
+        return localStream;
+      }
+
+      const mediaDevices = navigator.mediaDevices;
+      if (mediaDevices && typeof mediaDevices.getUserMedia === "function") {
+        localStream = await mediaDevices.getUserMedia({ audio: true, video: false });
+        ensureSpeakingMonitor(localStream);
+        if (sttTransport === "audio_chunk") {
+          startSttAudioCapture(localStream);
+        } else {
+          setupSpeechRecognition();
+          startSpeechRecognition();
+        }
+        logEvent("Microphone stream acquired");
+        return localStream;
+      }
+
+      const legacyGetUserMedia =
+        navigator.getUserMedia ||
+        navigator.webkitGetUserMedia ||
+        navigator.mozGetUserMedia;
+      if (typeof legacyGetUserMedia === "function") {
+        localStream = await new Promise((resolve, reject) => {
+          legacyGetUserMedia.call(
+            navigator,
+            { audio: true, video: false },
+            resolve,
+            reject,
+          );
+        });
+        ensureSpeakingMonitor(localStream);
+        if (sttTransport === "audio_chunk") {
+          startSttAudioCapture(localStream);
+        } else {
+          setupSpeechRecognition();
+          startSpeechRecognition();
+        }
+        logEvent("Microphone stream acquired (legacy API)");
+        return localStream;
+      }
+
+      const contextHint = window.isSecureContext
+        ? "Browser blocked media APIs in this session"
+        : "Page is not in a secure context";
+      const embedHint = window.top === window ? "" : " You are in an embedded frame/webview.";
+      const locationHint = ` Current origin: ${window.location.origin}.`;
+      const hostHint =
+        window.location.hostname === "0.0.0.0" || window.location.hostname === "::"
+          ? " Open localhost instead of wildcard hosts."
+          : "";
+      throw new Error(
+        `${contextHint}.${embedHint}${locationHint}${hostHint} Open https://localhost:8443 in Chrome/Edge/Firefox and allow microphone access.`,
+      );
+    }
+
+    function send(payload) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        logEvent("Cannot send: websocket is not connected");
+        return;
+      }
+      ws.send(JSON.stringify(payload));
+    }
+
+    async function getOrCreatePeerConnection(remoteParticipantId) {
+      if (peers.has(remoteParticipantId)) {
+        return peers.get(remoteParticipantId);
+      }
+
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+
+      const stream = await ensureLocalStream();
+      for (const track of stream.getTracks()) {
+        pc.addTrack(track, stream);
+      }
+
+      pc.onicecandidate = (event) => {
+        if (!event.candidate) {
+          return;
+        }
+        send({
+          type: "ice_candidate",
+          target_participant_id: remoteParticipantId,
+          candidate: event.candidate,
+        });
+      };
+
+      pc.ontrack = (event) => {
+        let audio = document.getElementById(`audio-${remoteParticipantId}`);
+        if (!audio) {
+          audio = document.createElement("audio");
+          audio.id = `audio-${remoteParticipantId}`;
+          audio.autoplay = true;
+          audio.controls = true;
+          audio.style.width = "100%";
+          participantsList.after(audio);
+        }
+        audio.srcObject = event.streams[0];
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+          closePeer(remoteParticipantId);
+        }
+      };
+
+      peers.set(remoteParticipantId, pc);
+      return pc;
+    }
+
+    async function makeOffer(remoteParticipantId) {
+      const pc = await getOrCreatePeerConnection(remoteParticipantId);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      send({
+        type: "webrtc_offer",
+        target_participant_id: remoteParticipantId,
+        sdp: pc.localDescription,
+      });
+      logEvent(`Offer sent to ${remoteParticipantId}`);
+    }
+
+    async function handleOffer(message) {
+      const fromId = message.from_participant_id;
+      const pc = await getOrCreatePeerConnection(fromId);
+      await pc.setRemoteDescription(new RTCSessionDescription(message.sdp));
+      await flushQueuedIce(fromId, pc);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      send({
+        type: "webrtc_answer",
+        target_participant_id: fromId,
+        sdp: pc.localDescription,
+      });
+      logEvent(`Answer sent to ${fromId}`);
+    }
+
+    async function handleAnswer(message) {
+      const fromId = message.from_participant_id;
+      const pc = peers.get(fromId);
+      if (!pc) {
+        return;
+      }
+      await pc.setRemoteDescription(new RTCSessionDescription(message.sdp));
+      await flushQueuedIce(fromId, pc);
+      logEvent(`Answer received from ${fromId}`);
+    }
+
+    async function handleIceCandidate(message) {
+      const fromId = message.from_participant_id;
+      const candidate = new RTCIceCandidate(message.candidate);
+      const pc = peers.get(fromId);
+
+      if (!pc || !pc.remoteDescription) {
+        if (!queuedIce.has(fromId)) {
+          queuedIce.set(fromId, []);
+        }
+        queuedIce.get(fromId).push(candidate);
+        return;
+      }
+      await pc.addIceCandidate(candidate);
+    }
+
+    async function flushQueuedIce(remoteParticipantId, pc) {
+      const queue = queuedIce.get(remoteParticipantId) || [];
+      for (const candidate of queue) {
+        await pc.addIceCandidate(candidate);
+      }
+      queuedIce.delete(remoteParticipantId);
+    }
+
+    function closePeer(remoteParticipantId) {
+      const pc = peers.get(remoteParticipantId);
+      if (pc) {
+        pc.close();
+      }
+      peers.delete(remoteParticipantId);
+      queuedIce.delete(remoteParticipantId);
+      const audio = document.getElementById(`audio-${remoteParticipantId}`);
+      if (audio) {
+        audio.remove();
+      }
+    }
+
+    function closeAllPeers() {
+      for (const peerId of peers.keys()) {
+        closePeer(peerId);
+      }
+    }
+
+    function removeParticipant(participantId) {
+      participants.delete(participantId);
+      renderParticipants();
+      closePeer(participantId);
+    }
+
+    function upsertParticipant(meta) {
+      const participantId = meta.participant_id;
+      const existing = participants.get(participantId) || {};
+      participants.set(participantId, {
+        ...existing,
+        ...meta,
+        is_speaking: Boolean(meta.is_speaking ?? existing.is_speaking ?? false),
+      });
+      renderParticipants();
+    }
+
+    async function handleMessage(message) {
+      if (message.type === "connected") {
+        selfId = message.participant_id;
+        selfIdEl.textContent = selfId;
+        const sttConfig = message.stt || {};
+        if (typeof sttConfig.transport === "string" && sttConfig.transport) {
+          sttTransport = sttConfig.transport;
+        }
+        if (typeof sttConfig.provider === "string" && sttConfig.provider) {
+          sttProviderName = sttConfig.provider;
+        }
+        if (typeof sttConfig.default_language_code === "string" && sttConfig.default_language_code) {
+          sttLanguageCode = sttConfig.default_language_code;
+        }
+        upsertParticipant({ participant_id: selfId, name: nameInput.value, role: "local", is_speaking: false });
+        logEvent(`Connected with self id ${selfId}`);
+        logEvent(`STT mode: ${sttTransport} (${sttProviderName})`);
+        return;
+      }
+
+      if (message.type === "joined_room") {
+        selfId = message.self.participant_id;
+        currentRoomId = message.room.room_id;
+        currentRoomEl.textContent = currentRoomId;
+        participants.clear();
+        localSpeaking = false;
+        resetSttState();
+        upsertParticipant(message.self);
+        for (const participant of message.participants) {
+          upsertParticipant(participant);
+        }
+        logEvent(`Joined room ${currentRoomId}`);
+        if (sttTransport === "audio_chunk") {
+          startSttAudioCapture(localStream);
+        } else {
+          startSpeechRecognition();
+        }
+        return;
+      }
+
+      if (message.type === "left_room") {
+        const previousRoomId = message.room_id;
+        setLocalSpeaking(false, { silentLog: true });
+        stopSpeechRecognition();
+        stopSttAudioCapture();
+        currentRoomId = null;
+        currentRoomEl.textContent = "-";
+        closeAllPeers();
+        participants.clear();
+        if (selfId) {
+          participants.set(selfId, {
+            participant_id: selfId,
+            name: nameInput.value,
+            role: "local",
+            is_speaking: false,
+          });
+        }
+        renderParticipants();
+        logEvent("Left room");
+        if (message.room_deleted && previousRoomId) {
+          logEvent(`Room ${previousRoomId} deleted`);
+        }
+        return;
+      }
+
+      if (message.type === "room_event") {
+        const event = message.event;
+        if (event.event_type === "participant_joined") {
+          upsertParticipant({
+            participant_id: event.participant_id,
+            name: event.participant_name,
+            role: event.participant_role,
+            is_speaking: event.is_speaking,
+          });
+          logEvent(`${event.participant_name} joined ${event.room_id}`);
+          if (event.participant_id !== selfId) {
+            await makeOffer(event.participant_id);
+          }
+        } else if (event.event_type === "participant_left") {
+          removeParticipant(event.participant_id);
+          logEvent(`${event.participant_name} left ${event.room_id}`);
+        } else if (event.event_type === "participant_speaking_started") {
+          setParticipantSpeaking(event.participant_id, true);
+          logEvent(`${event.participant_name} started speaking`);
+        } else if (event.event_type === "participant_speaking_stopped") {
+          setParticipantSpeaking(event.participant_id, false);
+          logEvent(`${event.participant_name} stopped speaking`);
+        } else if (event.event_type === "participant_transcript") {
+          if (event.participant_id !== selfId) {
+            const speakerName = event.participant_name || event.participant_id || "Unknown";
+            const transcriptText = event.transcript_text || "";
+            if (transcriptText) {
+              const statusSuffix = event.transcript_is_final ? "" : " (interim)";
+              logEvent(`${speakerName}: ${transcriptText}${statusSuffix}`);
+            }
+          }
+        } else if (event.event_type === "room_destroyed") {
+          logEvent(`Room ${event.room_id} deleted`);
+        }
+        return;
+      }
+
+      if (message.type === "webrtc_offer") {
+        await handleOffer(message);
+        return;
+      }
+
+      if (message.type === "webrtc_answer") {
+        await handleAnswer(message);
+        return;
+      }
+
+      if (message.type === "ice_candidate") {
+        await handleIceCandidate(message);
+        return;
+      }
+
+      if (message.type === "error") {
+        logEvent(`ERROR [${message.code}] ${message.message}`);
+      }
+    }
+
+    function connectWebSocket() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        logEvent("WebSocket already connected");
+        return;
+      }
+
+      ws = new WebSocket(wsUrlInput.value);
+      ws.onopen = () => {
+        setWsState(true);
+        logEvent("WebSocket connected");
+      };
+      ws.onclose = () => {
+        setWsState(false);
+        setLocalSpeaking(false, { silentLog: true });
+        stopSpeechRecognition();
+        stopSttAudioCapture();
+        currentRoomId = null;
+        currentRoomEl.textContent = "-";
+        logEvent("WebSocket closed");
+      };
+      ws.onerror = () => {
+        logEvent("WebSocket error");
+      };
+      ws.onmessage = async (event) => {
+        const message = JSON.parse(event.data);
+        try {
+          await handleMessage(message);
+        } catch (err) {
+          logEvent(`Client handling error: ${err.message}`);
+        }
+      };
+    }
+
+    async function joinRoom() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        logEvent("Connect websocket first");
+        return;
+      }
+      await ensureLocalStream();
+      send({
+        type: "join_room",
+        room_id: roomIdInput.value,
+        name: nameInput.value,
+        max_participants: Number(maxParticipantsInput.value),
+      });
+    }
+
+    function leaveRoom() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (localSpeaking) {
+        setLocalSpeaking(false, { silentLog: true });
+      }
+      stopSpeechRecognition();
+      stopSttAudioCapture();
+      send({ type: "leave_room" });
+    }
+
+    document.getElementById("connectBtn").addEventListener("click", connectWebSocket);
+    document.getElementById("joinBtn").addEventListener("click", () => {
+      joinRoom().catch((err) => logEvent(`Join error: ${err.message}`));
+    });
+    document.getElementById("leaveBtn").addEventListener("click", leaveRoom);
+    window.addEventListener("beforeunload", () => {
+      stopSpeechRecognition();
+      stopSttAudioCapture();
+      stopSpeakingMonitor();
+    });
+
+    const support = getMediaSupportSummary();
+    logEvent(
+      `Client ${CLIENT_VERSION} loaded | secure=${support.secure} | topLevel=${support.topLevel} | modernGUM=${support.modern} | legacyGUM=${support.legacy} | origin=${support.origin}`,
+    );
+  </script>
+</body>
+</html>

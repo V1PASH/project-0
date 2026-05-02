@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rtc-room-framework"
+version = "0.1.0"
+description = "Installable WebRTC room signaling framework with speaking and STT events."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi==0.136.1",
+  "uvicorn==0.46.0",
+  "websockets>=15,<16",
+]
+authors = [
+  { name = "RTC Room Framework Contributors" }
+]
+keywords = ["webrtc", "signaling", "fastapi", "stt", "voice", "rooms"]
+
+[project.scripts]
+rtc-room-server = "rtc_room_framework.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+  "room*",
+  "participants*",
+  "services*",
+  "signaling*",
+  "rtc_room_framework*",
+]
+
+[tool.setuptools.package-data]
+"rtc_room_framework.web" = ["index.html"]

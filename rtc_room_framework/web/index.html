@@ -1000,7 +1000,7 @@
             is_speaking: event.is_speaking,
           });
           logEvent(`${event.participant_name} joined ${event.room_id}`);
-          if (event.participant_id !== selfId) {
+          if (event.participant_id !== selfId && event.participant_role === "local") {
             await makeOffer(event.participant_id);
           }
         } else if (event.event_type === "participant_left") {

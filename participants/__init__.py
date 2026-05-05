@@ -1,7 +1,7 @@
 """Participant models and enums."""
 
 from participants.base import ParticipantRole, ParticipantState
-from participants.participant import LocalParticipant, Participant, RemoteParticipant
+from participants.participant import AgentParticipant, LocalParticipant, Participant, RemoteParticipant
 
 __all__ = [
     "ParticipantRole",
@@ -9,4 +9,5 @@ __all__ = [
     "Participant",
     "LocalParticipant",
     "RemoteParticipant",
+    "AgentParticipant",
 ]

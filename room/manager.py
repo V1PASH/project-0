@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Any, Callable, Optional
 
 from participants.base import ParticipantState
-from participants.participant import LocalParticipant, Participant, RemoteParticipant
+from participants.participant import AgentParticipant, LocalParticipant, Participant, RemoteParticipant
 from room.model import Room, RoomNotFoundError
 
 log = logging.getLogger(__name__)
@@ -223,6 +223,14 @@ class RoomManager:
         p = RemoteParticipant(name=name, participant_id=participant_id)
         self._participants[p.participant_id] = p
         log.info("Registered remote participant %s (%s)", p.participant_id, p.name)
+        return p
+
+    def register_agent_participant(
+        self, name: str = "Agent", participant_id: Optional[str] = None
+    ) -> Participant:
+        p = AgentParticipant(name=name, participant_id=participant_id)
+        self._participants[p.participant_id] = p
+        log.info("Registered agent participant %s (%s)", p.participant_id, p.name)
         return p
 
     def unregister_participant_by_id(self, participant_id: str) -> Optional[Participant]:

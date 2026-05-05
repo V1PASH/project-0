@@ -81,12 +81,53 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+### Agentic Participant Layer
+
+You can add a server-side agent into any room as a participant:
+
+```python
+import asyncio
+
+from rtc_room_framework import EchoTranscriptResponder, get_manager, get_room_control
+from rtc_room_framework.agent import AgentSession
+
+
+async def main() -> None:
+    manager = get_manager()
+    room_control = get_room_control()
+
+    agent = AgentSession(
+        manager,
+        room_control=room_control,
+        name="Support Agent",
+        responder=EchoTranscriptResponder(prefix="Support Agent: "),
+    )
+
+    await agent.start("demo-room", create_if_missing=True)
+    # Agent now appears in the room as role "agent" and responds to final transcript events.
+
+    await asyncio.sleep(30)
+    await agent.stop()
+
+
+asyncio.run(main())
+```
+
+Run server + echo agent in one process:
+
+```bash
+python scripts/run_server_with_agent.py --room-id demo-room --create-room
+```
+
+The agent session must run in the same process as the signaling server because room state is in-memory.
+
 ## Directory Structure
 
 ```text
 project-0/
 ├─ rtc_room_framework/
 │  ├─ __init__.py
+│  ├─ agent.py
 │  ├─ app.py
 │  ├─ cli.py
 │  └─ web/
@@ -108,6 +149,7 @@ project-0/
 │  └─ index.html
 ├─ tests/
 ├─ scripts/
+│  ├─ run_server_with_agent.py
 │  └─ run_https_dev.sh
 └─ pyproject.toml
 ```
@@ -122,6 +164,7 @@ project-0/
 | Participant model | `participants/*.py` | Participant identity, state (`connecting`/`in_room`/`disconnected`), speaking flag |
 | STT normalization | `services/stt_service.py` | Cleans, clamps, de-duplicates transcript updates and optionally calls provider |
 | STT providers | `services/stt_providers.py` | Provider-specific transcription adapters (Sarvam, Deepgram, OpenAI) |
+| Agentic participant layer | `rtc_room_framework/agent.py` | Register and run server-side agents as room participants with event-driven transcript replies |
 | Installable framework API | `rtc_room_framework/app.py`, `rtc_room_framework/cli.py` | Public API + CLI entry point for installed usage |
 | Browser client | `web/index.html` | WebSocket client, WebRTC peer logic, mic capture, speaking detection, STT transport |
 | HTTPS dev entrypoint | `scripts/run_https_dev.sh` | Self-signed cert generation + `uvicorn` with TLS on `https://localhost:8443` |

@@ -28,6 +28,14 @@ class RoomManagerTests(unittest.TestCase):
         self.assertEqual(local.state, ParticipantState.IN_ROOM)
         self.assertEqual(remote.state, ParticipantState.IN_ROOM)
 
+    def test_register_agent_participant_sets_agent_role(self) -> None:
+        agent = self.manager.register_agent_participant(name="Helper")
+
+        self.assertTrue(agent.participant_id.startswith("p-"))
+        self.assertEqual(agent.role, ParticipantRole.AGENT)
+        self.assertEqual(agent.name, "Helper")
+        self.assertEqual(agent.state, ParticipantState.CONNECTING)
+
     def test_announces_join_and_leave_events(self) -> None:
         participant = self.manager.register_participant(websocket=object(), name="Alice")
         room = self.manager.join_room(participant, "room-events")

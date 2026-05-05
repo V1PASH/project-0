@@ -7,6 +7,7 @@ from rtc_room_framework.app import (
     get_room_control,
     get_stt_service,
 )
+from rtc_room_framework.agent import AgentResponse, AgentSession, AgentSessionError, EchoTranscriptResponder
 from rtc_room_framework.sdk import RTCRoomClient, SDKError
 
 __all__ = [
@@ -15,6 +16,10 @@ __all__ = [
     "get_manager",
     "get_room_control",
     "get_stt_service",
+    "AgentResponse",
+    "AgentSession",
+    "AgentSessionError",
+    "EchoTranscriptResponder",
     "RTCRoomClient",
     "SDKError",
 ]

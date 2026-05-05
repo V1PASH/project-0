@@ -17,3 +17,4 @@ class ParticipantRole(str, Enum):
 
     LOCAL = "local"
     REMOTE = "remote"
+    AGENT = "agent"

@@ -38,6 +38,10 @@ class Participant:
     def is_remote(self) -> bool:
         return self.role is ParticipantRole.REMOTE
 
+    @property
+    def is_agent(self) -> bool:
+        return self.role is ParticipantRole.AGENT
+
     def to_dict(self) -> dict:
         return {
             "participant_id": self.participant_id,
@@ -75,5 +79,17 @@ class RemoteParticipant(Participant):
             websocket=None,
             name=name,
             role=ParticipantRole.REMOTE,
+            participant_id=participant_id or _new_participant_id(),
+        )
+
+
+class AgentParticipant(Participant):
+    """A participant controlled by server-side agent logic."""
+
+    def __init__(self, name: str = "Agent", participant_id: Optional[str] = None) -> None:
+        super().__init__(
+            websocket=None,
+            name=name,
+            role=ParticipantRole.AGENT,
             participant_id=participant_id or _new_participant_id(),
         )

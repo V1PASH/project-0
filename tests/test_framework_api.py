@@ -3,6 +3,9 @@ import unittest
 from fastapi import FastAPI
 
 from rtc_room_framework import (
+    AgentSession,
+    AgentSessionError,
+    EchoTranscriptResponder,
     RTCRoomFramework,
     create_app,
     get_manager,
@@ -22,6 +25,11 @@ class FrameworkAPITests(unittest.TestCase):
         self.assertIs(framework.manager, get_manager())
         self.assertIs(framework.stt_service, get_stt_service())
         self.assertIs(framework.room_control, get_room_control())
+
+    def test_agent_api_symbols_are_exported(self) -> None:
+        self.assertTrue(callable(AgentSession))
+        self.assertTrue(callable(EchoTranscriptResponder))
+        self.assertTrue(issubclass(AgentSessionError, RuntimeError))
 
 
 if __name__ == "__main__":

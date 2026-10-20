@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import signaling.server as signaling_server
+from fastapi import WebSocketDisconnect
 from room.control import RoomControlModule
 from room.manager import RoomManager
 from room.model import RoomFullError
@@ -309,6 +310,75 @@ class SignalingServerTests(unittest.IsolatedAsyncioTestCase):
         error_message = ws_alice.messages[-1]
         self.assertEqual(error_message["type"], "error")
         self.assertEqual(error_message["code"], "target_not_in_room")
+
+    async def test_relay_to_dead_target_does_not_disconnect_the_sender(self) -> None:
+        class DeadWebSocket(FakeWebSocket):
+            """Accepts the handshake, then drops when a relay is delivered."""
+
+            async def send_json(self, payload: dict) -> None:
+                if payload.get("type") in {"webrtc_offer", "webrtc_answer", "ice_candidate"}:
+                    raise WebSocketDisconnect(code=1006)
+                await super().send_json(payload)
+
+        ws_alice = FakeWebSocket()
+        ws_bob = DeadWebSocket()
+        alice = signaling_server.manager.register_participant(ws_alice, name="Alice")
+        bob = signaling_server.manager.register_participant(ws_bob, name="Bob")
+
+        await signaling_server._handle_message(alice, {"type": "join_room", "room_id": "room-dead"})
+        await signaling_server._handle_message(bob, {"type": "join_room", "room_id": "room-dead"})
+
+        # A dead target must not take down the healthy sender's connection.
+        await signaling_server._handle_message(
+            alice,
+            {
+                "type": "webrtc_offer",
+                "target_participant_id": bob.participant_id,
+                "sdp": {"type": "offer", "sdp": "fake-offer"},
+            },
+        )
+
+        error_message = ws_alice.messages[-1]
+        self.assertEqual(error_message["type"], "error")
+        self.assertEqual(error_message["code"], "target_unavailable")
+        # The sender is still registered and still in the room.
+        self.assertIsNotNone(signaling_server.manager.get_participant(alice.participant_id))
+        self.assertEqual(alice.room_id, "room-dead")
+
+    async def test_join_room_reports_eviction(self) -> None:
+        ws_alice = FakeWebSocket()
+        ws_bob = FakeWebSocket()
+        alice = signaling_server.manager.register_participant(ws_alice, name="Alice")
+        bob = signaling_server.manager.register_participant(ws_bob, name="Bob")
+
+        await signaling_server._handle_message(alice, {"type": "join_room", "room_id": "room-kick"})
+        await signaling_server._handle_message(bob, {"type": "join_room", "room_id": "room-kick"})
+
+        signaling_server.room_control.remove_participant(alice.participant_id)
+
+        await signaling_server._handle_message(
+            alice, {"type": "join_room", "room_id": "room-kick"}
+        )
+
+        error_message = ws_alice.messages[-1]
+        self.assertEqual(error_message["type"], "error")
+        self.assertEqual(error_message["code"], "participant_evicted")
+
+    async def test_join_room_uses_server_default_when_max_participants_is_omitted(self) -> None:
+        original_limit = signaling_server.room_control.max_participants_limit
+        signaling_server.room_control.max_participants_limit = 5
+        try:
+            ws = FakeWebSocket()
+            participant = signaling_server.manager.register_participant(ws, name="Alice")
+
+            await signaling_server._handle_message(
+                participant, {"type": "join_room", "room_id": "room-default"}
+            )
+        finally:
+            signaling_server.room_control.max_participants_limit = original_limit
+
+        self.assertEqual(ws.messages[-1]["type"], "joined_room")
+        self.assertEqual(ws.messages[-1]["room"]["max_participants"], 5)
 
     async def test_participant_activity_broadcasts_speaking_events(self) -> None:
         ws_alice = FakeWebSocket()
@@ -641,6 +711,44 @@ class WebSocketEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(signaling_server.manager.active_participant_count, 0)
         self.assertIsNone(signaling_server.manager.get_room("ws-room"))
+
+    async def test_participant_is_unregistered_when_disconnect_happens_during_handshake(self) -> None:
+        class DisconnectingWebSocket(FakeSocketWebSocket):
+            async def send_json(self, payload: dict) -> None:
+                raise WebSocketDisconnect(code=1006)
+
+        ws = DisconnectingWebSocket()
+
+        await signaling_server.websocket_endpoint(ws)
+
+        # A client that drops during the handshake must not leak a participant.
+        self.assertEqual(signaling_server.manager.active_participant_count, 0)
+        self.assertEqual(len(signaling_server.manager._ws_index), 0)
+
+    async def test_endpoint_survives_a_send_failure_to_a_dead_peer(self) -> None:
+        class DeadTargetWebSocket(FakeWebSocket):
+            async def send_json(self, payload: dict) -> None:
+                raise WebSocketDisconnect(code=1006)
+
+        ws = FakeSocketWebSocket(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps({"type": "join_room", "room_id": "ws-room"}),
+                },
+                {"type": "websocket.disconnect", "code": 1000},
+            ]
+        )
+        dead = DeadTargetWebSocket()
+        dead_participant = signaling_server.manager.register_participant(dead, name="Ghost")
+        signaling_server.manager.join_room(dead_participant, "ws-room")
+
+        await signaling_server.websocket_endpoint(ws)
+
+        # The endpoint finished normally instead of blowing up.
+        self.assertTrue(ws.accepted)
+        self.assertEqual(ws.messages[0]["type"], "connected")
+        self.assertEqual(signaling_server.manager.active_participant_count, 1)
 
 
 class ConfigurationTests(unittest.TestCase):

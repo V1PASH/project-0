@@ -13,6 +13,7 @@ from room.control import (
 from room.manager import EventListener, RoomEvent, RoomEventType, RoomManager
 from room.model import (
     DuplicateParticipantError,
+    ParticipantEvictedError,
     ParticipantNotInRoomError,
     Room,
     RoomError,
@@ -39,4 +40,5 @@ __all__ = [
     "RoomNotFoundError",
     "ParticipantNotInRoomError",
     "DuplicateParticipantError",
+    "ParticipantEvictedError",
 ]

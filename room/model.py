@@ -25,6 +25,10 @@ class DuplicateParticipantError(RoomError):
     """Raised when the same participant is added twice to one room."""
 
 
+class ParticipantEvictedError(RoomError):
+    """Raised when an evicted participant tries to rejoin the same room."""
+
+
 class RoomNotFoundError(RoomError):
     """Raised when a room lookup fails for an expected existing room."""
 
@@ -38,6 +42,7 @@ class Room:
     created_at: float = field(default_factory=time.time)
     created_by: Optional[str] = None
     _participants: dict[str, Participant] = field(default_factory=dict, repr=False)
+    evicted_participant_ids: set[str] = field(default_factory=set, repr=False)
 
     def add_participant(self, participant: Participant) -> None:
         if len(self._participants) >= self.max_participants:
@@ -47,6 +52,10 @@ class Room:
         if participant.participant_id in self._participants:
             raise DuplicateParticipantError(
                 f"Participant {participant.participant_id!r} is already in room {self.room_id!r}"
+            )
+        if participant.participant_id in self.evicted_participant_ids:
+            raise ParticipantEvictedError(
+                f"Participant {participant.participant_id!r} was removed from room {self.room_id!r}"
             )
         self._participants[participant.participant_id] = participant
         participant.room_id = self.room_id

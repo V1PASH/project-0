@@ -8,7 +8,7 @@ from room.control import (
     RoomControlModule,
 )
 from room.manager import RoomManager
-from room.model import RoomNotFoundError
+from room.model import ParticipantEvictedError, RoomNotFoundError
 
 
 class RoomControlModuleTests(unittest.TestCase):
@@ -134,6 +134,64 @@ class RoomControlModuleTests(unittest.TestCase):
         self.assertIsNone(self.manager.get_room("close-room"))
         self.assertIsNone(alice.room_id)
         self.assertIsNone(bob.room_id)
+
+    def test_validate_max_participants_clamps_default_to_limit(self) -> None:
+        control = RoomControlModule(self.manager, max_participants_limit=5)
+
+        # A lowered limit must not reject the server's own default, otherwise
+        # every client that omits max_participants is locked out.
+        self.assertEqual(control.validate_max_participants(None), 5)
+
+    def test_validate_max_participants_clamps_default_when_limit_is_lowered(self) -> None:
+        control = RoomControlModule(self.manager)
+        control.max_participants_limit = 3
+
+        self.assertEqual(control.validate_max_participants(None), 3)
+
+    def test_removed_participant_cannot_rejoin_the_same_room(self) -> None:
+        alice = self.manager.register_participant(websocket=object(), name="Alice")
+        bob = self.manager.register_participant(websocket=object(), name="Bob")
+        self.control.create_room("kick-room", max_participants=5)
+        self.control.join_participant(alice, room_name="kick-room", create_if_missing=False)
+        self.control.join_participant(bob, room_name="kick-room", create_if_missing=False)
+
+        self.control.remove_participant(alice.participant_id)
+
+        self.assertIsNone(alice.room_id)
+        with self.assertRaises(ParticipantEvictedError):
+            self.control.join_participant(alice, room_name="kick-room", create_if_missing=False)
+
+    def test_evicted_participant_may_join_a_different_room(self) -> None:
+        alice = self.manager.register_participant(websocket=object(), name="Alice")
+        bob = self.manager.register_participant(websocket=object(), name="Bob")
+        self.control.create_room("kick-room", max_participants=5)
+        self.control.join_participant(alice, room_name="kick-room", create_if_missing=False)
+        self.control.join_participant(bob, room_name="kick-room", create_if_missing=False)
+        self.control.remove_participant(alice.participant_id)
+
+        self.control.create_room("other-room", max_participants=5)
+        room, _ = self.control.join_participant(
+            alice, room_name="other-room", create_if_missing=False
+        )
+
+        self.assertEqual(room.room_id, "other-room")
+
+    def test_close_room_blocks_evicted_participants_from_rejoining(self) -> None:
+        alice = self.manager.register_participant(websocket=object(), name="Alice")
+        bob = self.manager.register_participant(websocket=object(), name="Bob")
+        self.control.create_room("close-room", max_participants=5)
+        self.control.join_participant(alice, room_name="close-room", create_if_missing=False)
+        self.control.join_participant(bob, room_name="close-room", create_if_missing=False)
+
+        self.control.close_room("close-room")
+
+        # The room is gone, so re-creating it gives a fresh room that the
+        # previously evicted participant may join again.
+        self.control.create_room("close-room", max_participants=5)
+        room, _ = self.control.join_participant(
+            alice, room_name="close-room", create_if_missing=False
+        )
+        self.assertEqual(room.room_id, "close-room")
 
 
 if __name__ == "__main__":

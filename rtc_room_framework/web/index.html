@@ -219,7 +219,7 @@
           </div>
           <div>
             <label for="maxParticipants">Max Participants</label>
-            <input id="maxParticipants" value="10" />
+            <input id="maxParticipants" type="number" min="1" placeholder="Server default" />
           </div>
         </div>
 
@@ -1080,18 +1080,58 @@
       };
     }
 
+    function readMaxParticipants() {
+      const raw = maxParticipantsInput.value.trim();
+      if (!raw) {
+        return null;
+      }
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        return null;
+      }
+      return parsed;
+    }
+
+    async function loadServerLimits() {
+      try {
+        const response = await fetch("/health", { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        const limit = payload?.config?.max_room_participants;
+        if (!Number.isInteger(limit) || limit <= 0) {
+          return;
+        }
+        maxParticipantsInput.max = String(limit);
+        maxParticipantsInput.placeholder = `Server default (max ${limit})`;
+        const current = readMaxParticipants();
+        if (current !== null && current > limit) {
+          maxParticipantsInput.value = String(limit);
+        }
+      } catch (err) {
+        logEvent(`Could not load server limits: ${err.message}`);
+      }
+    }
+
     async function joinRoom() {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         logEvent("Connect websocket first");
         return;
       }
       await ensureLocalStream();
-      send({
+      const payload = {
         type: "join_room",
         room_id: roomIdInput.value,
         name: nameInput.value,
-        max_participants: Number(maxParticipantsInput.value),
-      });
+      };
+      // Omit the field when it is blank or invalid so the server applies its
+      // own (limit-clamped) default instead of rejecting the join.
+      const maxParticipants = readMaxParticipants();
+      if (maxParticipants !== null) {
+        payload.max_participants = maxParticipants;
+      }
+      send(payload);
     }
 
     function leaveRoom() {
@@ -1121,6 +1161,7 @@
     logEvent(
       `Client ${CLIENT_VERSION} loaded | secure=${support.secure} | topLevel=${support.topLevel} | modernGUM=${support.modern} | legacyGUM=${support.legacy} | origin=${support.origin}`,
     );
+    loadServerLimits();
   </script>
 </body>
 </html>

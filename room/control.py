@@ -85,14 +85,17 @@ class RoomControlModule:
         return normalized
 
     def validate_max_participants(self, max_participants: int | None) -> int:
-        value = self._default_max_participants if max_participants is None else max_participants
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        if max_participants is None:
+            # The server-side default is clamped to the configured limit so a
+            # lowered MAX_ROOM_PARTICIPANTS never rejects every join.
+            return min(self._default_max_participants, self._max_participants_limit)
+        if isinstance(max_participants, bool) or not isinstance(max_participants, int) or max_participants <= 0:
             raise RoomControlError("max_participants must be a positive integer")
-        if value > self._max_participants_limit:
+        if max_participants > self._max_participants_limit:
             raise RoomControlError(
                 f"max_participants must be <= {self._max_participants_limit}"
             )
-        return value
+        return max_participants
 
     def create_room(
         self,
@@ -159,7 +162,7 @@ class RoomControlModule:
         removed_participant_ids: list[str] = []
         for participant in list(room.participants):
             removed_participant_ids.append(participant.participant_id)
-            self._manager.leave_room(participant)
+            self._manager.leave_room(participant, evict=True)
 
         # Leaving the last participant already destroys the room; this also covers
         # rooms that were empty when close_room was called.
@@ -180,7 +183,7 @@ class RoomControlModule:
             )
 
         room_id = participant.room_id
-        remaining_room = self._manager.leave_room(participant)
+        remaining_room = self._manager.leave_room(participant, evict=True)
         return ParticipantRemovalResult(
             participant_id=participant.participant_id,
             room_id=room_id,

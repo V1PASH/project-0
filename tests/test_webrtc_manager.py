@@ -3,6 +3,7 @@ import unittest
 
 from participants.base import ParticipantRole, ParticipantState
 from room.manager import RoomEventType, RoomManager
+from room.model import ParticipantEvictedError
 
 
 class RoomManagerTests(unittest.TestCase):
@@ -123,6 +124,54 @@ class RoomManagerTests(unittest.TestCase):
         event_types = [event["event_type"] for event in self.events]
         self.assertIn(RoomEventType.PARTICIPANT_LEFT.value, event_types)
         self.assertIn(RoomEventType.ROOM_DESTROYED.value, event_types)
+
+    def test_destroy_room_evicts_remaining_participants(self) -> None:
+        alice = self.manager.register_participant(websocket=object(), name="Alice")
+        bob = self.manager.register_participant(websocket=object(), name="Bob")
+        self.manager.join_room(alice, "doomed")
+        self.manager.join_room(bob, "doomed")
+
+        self.manager.destroy_room("doomed")
+
+        # Nobody may keep pointing at a room that no longer exists.
+        self.assertIsNone(alice.room_id)
+        self.assertIsNone(bob.room_id)
+        self.assertEqual(alice.state, ParticipantState.CONNECTING)
+        self.assertEqual(bob.state, ParticipantState.CONNECTING)
+
+    def test_leave_room_clears_state_when_last_member_leaves(self) -> None:
+        participant = self.manager.register_participant(websocket=object(), name="Alice")
+        self.manager.join_room(participant, "solo")
+
+        self.manager.leave_room(participant)
+
+        self.assertIsNone(participant.room_id)
+        self.assertEqual(participant.state, ParticipantState.CONNECTING)
+
+    def test_leave_room_clears_stale_room_id_when_room_is_gone(self) -> None:
+        participant = self.manager.register_participant(websocket=object(), name="Alice")
+        self.manager.join_room(participant, "vanished")
+        # Simulate the room disappearing without the participant being removed.
+        self.manager._rooms.pop("vanished")
+
+        self.manager.leave_room(participant)
+
+        self.assertIsNone(participant.room_id)
+        self.assertEqual(participant.state, ParticipantState.CONNECTING)
+
+    def test_evict_records_participant_on_the_room(self) -> None:
+        alice = self.manager.register_participant(websocket=object(), name="Alice")
+        bob = self.manager.register_participant(websocket=object(), name="Bob")
+        self.manager.join_room(alice, "kick-room")
+        self.manager.join_room(bob, "kick-room")
+
+        self.manager.leave_room(alice, evict=True)
+
+        room = self.manager.get_room("kick-room")
+        self.assertIsNotNone(room)
+        self.assertIn(alice.participant_id, room.evicted_participant_ids)
+        with self.assertRaises(ParticipantEvictedError):
+            self.manager.join_room(alice, "kick-room")
 
 
 class FakeWebSocket:
@@ -249,6 +298,99 @@ class RoomManagerBroadcastTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event_payload["transcript_text"], "draft sentence")
         self.assertFalse(event_payload["transcript_is_final"])
         self.assertEqual(ws2.messages, [])
+
+    async def test_awaits_futures_returned_by_send_json(self) -> None:
+        manager = RoomManager()
+        delivered: list[dict] = []
+
+        class FutureWebSocket:
+            def send_json(self, payload: dict) -> asyncio.Future:
+                future: asyncio.Future = asyncio.get_running_loop().create_future()
+                future.set_result(None)
+                delivered.append(payload)
+                return future
+
+        participant = manager.register_participant(websocket=FutureWebSocket(), name="Alice")
+        await manager._send_to_websocket(participant.websocket, {"type": "ping"})
+
+        self.assertEqual(delivered, [{"type": "ping"}])
+
+    async def test_schedules_async_listeners_that_return_futures(self) -> None:
+        manager = RoomManager()
+        seen: list[dict] = []
+
+        def listener(payload: dict) -> asyncio.Future:
+            future: asyncio.Future = asyncio.get_running_loop().create_future()
+            future.set_result(None)
+            seen.append(payload)
+            return future
+
+        manager.add_event_listener(listener)
+        participant = manager.register_participant(websocket=object(), name="Alice")
+        manager.join_room(participant, "room-listener")
+        await asyncio.sleep(0)
+
+        self.assertTrue(seen)
+        self.assertEqual(seen[0]["event_type"], RoomEventType.ROOM_CREATED.value)
+
+    async def test_background_tasks_are_tracked_and_drained_on_shutdown(self) -> None:
+        manager = RoomManager()
+        release = asyncio.Event()
+
+        class SlowWebSocket:
+            def __init__(self) -> None:
+                self.messages: list[dict] = []
+
+            async def send_json(self, payload: dict) -> None:
+                await release.wait()
+                self.messages.append(payload)
+
+        slow = SlowWebSocket()
+        alice = manager.register_participant(websocket=slow, name="Alice")
+        bob = manager.register_participant(websocket=object(), name="Bob")
+        manager.join_room(alice, "room-shutdown")
+        manager.join_room(bob, "room-shutdown")
+
+        await asyncio.sleep(0)
+        self.assertTrue(manager._background_tasks)
+
+        await manager.shutdown()
+        self.assertEqual(manager._background_tasks, set())
+
+    async def test_evicted_participant_is_notified(self) -> None:
+        manager = RoomManager()
+        ws = FakeWebSocket()
+        alice = manager.register_participant(websocket=ws, name="Alice")
+        bob = manager.register_participant(websocket=object(), name="Bob")
+        manager.join_room(alice, "room-evict")
+        manager.join_room(bob, "room-evict")
+        await asyncio.sleep(0)
+        ws.messages.clear()
+
+        manager.leave_room(alice, evict=True)
+        await asyncio.sleep(0)
+
+        self.assertTrue(ws.messages)
+        self.assertEqual(ws.messages[-1]["type"], "left_room")
+        self.assertEqual(ws.messages[-1]["reason"], "evicted")
+        self.assertTrue(ws.messages[-1]["room_exists"])
+        self.assertFalse(ws.messages[-1]["room_deleted"])
+
+    async def test_last_evicted_participant_is_notified_that_the_room_was_deleted(self) -> None:
+        manager = RoomManager()
+        ws = FakeWebSocket()
+        alice = manager.register_participant(websocket=ws, name="Alice")
+        manager.join_room(alice, "room-evict-last")
+        await asyncio.sleep(0)
+        ws.messages.clear()
+
+        manager.leave_room(alice, evict=True)
+        await asyncio.sleep(0)
+
+        self.assertTrue(ws.messages)
+        self.assertEqual(ws.messages[-1]["type"], "left_room")
+        self.assertEqual(ws.messages[-1]["reason"], "evicted")
+        self.assertTrue(ws.messages[-1]["room_deleted"])
 
 
 if __name__ == "__main__":

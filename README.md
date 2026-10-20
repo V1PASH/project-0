@@ -66,8 +66,32 @@ export REQUIRE_EXPLICIT_ROOM_CREATE=false
 | `STT_PROVIDER` | `browser` | `browser`, `openai`, `deepgram`, or `sarvam` |
 | `STT_LANGUAGE_CODE` | `unknown` | Default language hint sent to STT providers |
 | `OPENAI_API_KEY` / `OPENAI_STT_MODEL` | _unset_ / `gpt-4o-mini-transcribe` | OpenAI STT settings |
+| `OPENAI_STT_TIMEOUT_SECONDS` | `20` | OpenAI STT request timeout |
 | `DEEPGRAM_API_KEY` / `DEEPGRAM_STT_MODEL` | _unset_ / `nova-3` | Deepgram STT settings |
-| `SARVAM_API_KEY` / `SARVAM_STT_MODEL` | _unset_ / `saaras:v3` | Sarvam STT settings |
+| `DEEPGRAM_STT_SMART_FORMAT` | `true` | Ask Deepgram for smart-formatted transcripts |
+| `DEEPGRAM_STT_TIMEOUT_SECONDS` | `20` | Deepgram STT request timeout |
+| `SARVAM_API_KEY` / `SARVAM_API_SUBSCRIPTION_KEY` | _unset_ | Sarvam credentials (either name works) |
+| `SARVAM_STT_MODEL` / `SARVAM_STT_MODE` | `saaras:v3` / `transcribe` | Sarvam STT settings |
+| `SARVAM_STT_TIMEOUT_SECONDS` | `20` | Sarvam STT request timeout |
+
+### Room capacity
+
+`MAX_ROOM_PARTICIPANTS` caps the `max_participants` value a client may request. The
+server-side default (10) is clamped to that cap, so lowering the cap below 10 never
+rejects a join that omits the field. The bundled web client reads the effective cap
+from `GET /health` and only sends `max_participants` when the field is filled in.
+
+Capacity is fixed when a room is created: a client joining an existing room cannot
+change it, and the first client to create a room chooses its size (up to the cap).
+
+### Removing participants
+
+`RoomControlModule.remove_participant()` and `RoomControlModule.close_room()` evict
+participants. An evicted client is notified with a `left_room` message (including
+`"reason": "evicted"`) and is rejected if it tries to rejoin that room — it receives
+`participant_evicted` instead of `joined_room`. The restriction is scoped to the
+lifetime of that room: once the room is destroyed and re-created, the participant may
+join again.
 
 ### Web client asset
 

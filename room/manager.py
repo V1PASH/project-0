@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -31,6 +32,16 @@ class RoomEventType(str, Enum):
 
 def _new_event_id() -> str:
     return f"evt-{uuid.uuid4().hex[:12]}"
+
+
+def _close_awaitable(awaitable: Any) -> None:
+    """Close a never-awaited coroutine so Python does not warn about it."""
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # pragma: no cover - defensive cleanup.
+            log.debug("Failed to close unused awaitable", exc_info=True)
 
 
 @dataclass(frozen=True)
@@ -75,6 +86,40 @@ class RoomManager:
         self._event_listeners: set[EventListener] = set()
         self._event_history: list[RoomEvent] = []
         self._event_history_size = max(event_history_size, 0)
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
+    def _spawn_task(self, coro: Any) -> None:
+        """Schedule a background awaitable while keeping a strong reference.
+
+        Keeping the task alive prevents it from being garbage collected mid
+        flight and lets shutdown drain anything still in progress.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _close_awaitable(coro)
+            return
+        # ensure_future (unlike create_task) also accepts Futures and other
+        # awaitables returned by event listeners.
+        task = asyncio.ensure_future(coro, loop=loop)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def shutdown(self) -> None:
+        """Cancel and drain any background tasks still in flight."""
+        tasks = tuple(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
+
+    def notify_participant(self, participant: Participant, payload: dict) -> None:
+        """Best-effort delivery of a control message to a single participant."""
+        websocket = participant.websocket
+        if websocket is None:
+            return
+        self._spawn_task(self._send_to_websocket_safe(websocket, payload))
 
     def add_event_listener(self, listener: EventListener) -> None:
         self._event_listeners.add(listener)
@@ -95,7 +140,7 @@ class RoomManager:
         for listener in tuple(self._event_listeners):
             try:
                 result = listener(payload)
-                if asyncio.iscoroutine(result):
+                if inspect.isawaitable(result):
                     try:
                         loop = asyncio.get_running_loop()
                     except RuntimeError:
@@ -103,8 +148,9 @@ class RoomManager:
                             "No running loop for async event listener while emitting %s",
                             event.event_id,
                         )
+                        _close_awaitable(result)
                         continue
-                    loop.create_task(result)
+                    self._spawn_task(result)
             except Exception:
                 log.exception("Event listener failed while handling %s", event.event_id)
 
@@ -131,11 +177,7 @@ class RoomManager:
         if not recipient_ids:
             return
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(
+        self._spawn_task(
             self._broadcast_room_event(
                 event=event.to_dict(),
                 recipient_participant_ids=recipient_ids,
@@ -188,25 +230,35 @@ class RoomManager:
                     participant.participant_id,
                 )
 
+    async def _send_to_websocket_safe(self, websocket: object, payload: dict) -> None:
+        """Send a payload, logging (not raising) any delivery failure."""
+        try:
+            await self._send_to_websocket(websocket, payload)
+        except Exception:
+            log.exception(
+                "Failed to deliver message type %s",
+                payload.get("type"),
+            )
+
     async def _send_to_websocket(self, websocket: object, payload: dict) -> None:
         send_json = getattr(websocket, "send_json", None)
         if callable(send_json):
             result = send_json(payload)
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 await result
             return
 
         send_text = getattr(websocket, "send_text", None)
         if callable(send_text):
             result = send_text(json.dumps(payload))
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 await result
             return
 
         send = getattr(websocket, "send", None)
         if callable(send):
             result = send(json.dumps(payload))
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 await result
             return
 
@@ -403,30 +455,55 @@ class RoomManager:
         self._emit_event(event)
         return event
 
-    def leave_room(self, participant: Participant) -> Optional[Room]:
+    def leave_room(self, participant: Participant, *, evict: bool = False) -> Optional[Room]:
         if not participant.room_id:
             return None
         room_id = participant.room_id
         room = self._rooms.get(room_id)
-        if room:
-            participant.is_speaking = False
-            room.remove_participant(participant.participant_id)
-            self._emit_event(
-                RoomEvent(
-                    event_type=RoomEventType.PARTICIPANT_LEFT,
-                    room_id=room.room_id,
-                    participant_id=participant.participant_id,
-                    participant_name=participant.name,
-                    participant_role=participant.role.value,
-                    participant_count=room.participant_count,
-                )
+        if room is None:
+            # The room was destroyed out from under the participant: drop the
+            # stale room_id so the participant is not considered "in a room".
+            participant.room_id = None
+            if participant.state is not ParticipantState.DISCONNECTED:
+                participant.transition(ParticipantState.CONNECTING)
+            return None
+
+        if evict:
+            room.evicted_participant_ids.add(participant.participant_id)
+
+        participant.is_speaking = False
+        room.remove_participant(participant.participant_id)
+        self._emit_event(
+            RoomEvent(
+                event_type=RoomEventType.PARTICIPANT_LEFT,
+                room_id=room.room_id,
+                participant_id=participant.participant_id,
+                participant_name=participant.name,
+                participant_role=participant.role.value,
+                participant_count=room.participant_count,
             )
-            log.info("Participant %s left room %s", participant.participant_id, room.room_id)
-            if room.is_empty:
-                self._destroy_room(room.room_id, triggered_by=participant)
-                return None
+        )
+        log.info("Participant %s left room %s", participant.participant_id, room.room_id)
+
         if participant.state is not ParticipantState.DISCONNECTED:
             participant.transition(ParticipantState.CONNECTING)
+
+        if evict:
+            self.notify_participant(
+                participant,
+                {
+                    "type": "left_room",
+                    "room_id": room.room_id,
+                    "room_exists": not room.is_empty,
+                    "room_deleted": room.is_empty,
+                    "reason": "evicted",
+                },
+            )
+
+        if room.is_empty:
+            self._destroy_room(room.room_id, triggered_by=participant)
+            return None
+
         return room
 
     def destroy_room(self, room_id: str, triggered_by: Optional[Participant] = None) -> bool:
@@ -443,6 +520,13 @@ class RoomManager:
         room = self._rooms.pop(room_id, None)
         if room is None:
             return
+        # Evict any remaining members so nobody keeps a stale room_id pointing
+        # at a room that no longer exists.
+        for participant in room.participants:
+            participant.room_id = None
+            participant.is_speaking = False
+            if participant.state is not ParticipantState.DISCONNECTED:
+                participant.transition(ParticipantState.CONNECTING)
         self._emit_event(
             RoomEvent(
                 event_type=RoomEventType.ROOM_DESTROYED,

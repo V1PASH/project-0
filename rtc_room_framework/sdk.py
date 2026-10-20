@@ -63,7 +63,9 @@ class RTCRoomClient:
         room_id: str,
         api_ts: int,
     ) -> str:
-        message = f"{api_key}:{room_id}:{api_ts}".encode("utf-8")
+        # The server normalizes room_id and api_key before verifying the
+        # signature, so the client must sign the same normalized values.
+        message = f"{api_key.strip()}:{room_id.strip()}:{api_ts}".encode("utf-8")
         return hmac.new(api_secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
     async def create_room(
@@ -80,7 +82,7 @@ class RTCRoomClient:
         auth_secret = api_secret if api_secret is not None else self.create_room_api_secret
         return await self._send_and_expect(
             self._build_create_room_payload(
-                room_id=room_id,
+                room_id=room_id.strip(),
                 max_participants=max_participants,
                 auth_key=auth_key,
                 auth_secret=auth_secret,
@@ -94,7 +96,7 @@ class RTCRoomClient:
         return await self._send_and_expect(
             {
                 "type": "join_room",
-                "room_id": room_id,
+                "room_id": room_id.strip(),
                 "name": self.name,
                 "max_participants": max_participants,
             },

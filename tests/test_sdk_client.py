@@ -104,6 +104,54 @@ class RTCRoomClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SDKError):
             await client.publish_audio(b"")
 
+    async def test_create_room_normalizes_room_id_and_api_key_before_signing(self) -> None:
+        websocket = FakeSDKWebSocket(
+            incoming_messages=[{"type": "joined_room", "room": {"room_id": "secure-room"}}]
+        )
+        client = RTCRoomClient(
+            "ws://localhost:8000/ws",
+            name="Alice",
+            create_room_api_key="room-key",
+            create_room_api_secret="room-secret",
+        )
+        client._websocket = websocket
+
+        await client.create_room("  secure-room  ")
+
+        sent = websocket.sent_messages[0]
+        self.assertEqual(sent["room_id"], "secure-room")
+        # The server strips room_id/api_key before verifying, so the client has
+        # to sign the same normalized values or the token never matches.
+        self.assertEqual(
+            sent["api_token"],
+            RTCRoomClient.build_create_room_token(
+                api_key="room-key",
+                api_secret="room-secret",
+                room_id="secure-room",
+                api_ts=sent["api_ts"],
+            ),
+        )
+        self.assertEqual(
+            sent["api_token"],
+            RTCRoomClient.build_create_room_token(
+                api_key=" room-key ",
+                api_secret="room-secret",
+                room_id=" secure-room ",
+                api_ts=sent["api_ts"],
+            ),
+        )
+
+    async def test_join_room_normalizes_room_id(self) -> None:
+        websocket = FakeSDKWebSocket(
+            incoming_messages=[{"type": "joined_room", "room": {"room_id": "sdk-room"}}]
+        )
+        client = RTCRoomClient("ws://localhost:8000/ws", name="Alice")
+        client._websocket = websocket
+
+        await client.join_room("  sdk-room  ")
+
+        self.assertEqual(websocket.sent_messages[0]["room_id"], "sdk-room")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,7 +27,7 @@ from room.control import (
     RoomNotFoundError,
 )
 from room.manager import RoomManager
-from room.model import RoomFullError
+from room.model import ParticipantEvictedError, RoomFullError
 from services.stt_providers import build_stt_provider_from_env
 from services.stt_service import STTService, STTServiceError
 
@@ -160,6 +160,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     finally:
         for hook in tuple(reversed(_shutdown_hooks)):
             await hook()
+        await manager.shutdown()
 
 
 app = FastAPI(title="WebRTC Room Signaling", lifespan=lifespan)
@@ -291,19 +292,22 @@ async def health() -> JSONResponse:
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     participant = manager.register_participant(websocket=websocket)
-    await websocket.send_json(
-        {
-            "type": "connected",
-            "participant_id": participant.participant_id,
-            "stt": {
-                "provider": stt_service.provider_name,
-                "transport": "audio_chunk" if stt_service.uses_audio_provider else "browser_text",
-                "default_language_code": DEFAULT_STT_LANGUAGE_CODE,
-            },
-        }
-    )
 
     try:
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "participant_id": participant.participant_id,
+                "stt": {
+                    "provider": stt_service.provider_name,
+                    "transport": "audio_chunk"
+                    if stt_service.uses_audio_provider
+                    else "browser_text",
+                    "default_language_code": DEFAULT_STT_LANGUAGE_CODE,
+                },
+            }
+        )
+
         while True:
             event = await websocket.receive()
             if event.get("type") == "websocket.disconnect":
@@ -455,6 +459,13 @@ async def _handle_join_or_create_room(
         )
     except RoomNotFoundError:
         await _send_error(participant.websocket, "room_not_found", f"Room does not exist: {room_id}")
+        return
+    except ParticipantEvictedError:
+        await _send_error(
+            participant.websocket,
+            "participant_evicted",
+            "You were removed from this room",
+        )
         return
     except RoomFullError:
         if room_was_created:
@@ -719,7 +730,20 @@ async def _relay_webrtc_message(
     if "candidate" in payload:
         relay_payload["candidate"] = payload["candidate"]
 
-    await target.websocket.send_json(relay_payload)
+    try:
+        await target.websocket.send_json(relay_payload)
+    except Exception:
+        # A dead target must never take down the sender's connection.
+        log.exception(
+            "Failed to relay %s to participant %s",
+            message_type,
+            target.participant_id,
+        )
+        await _send_error(
+            sender.websocket,
+            "target_unavailable",
+            "Target participant is not reachable",
+        )
 
 
 async def _send_error(websocket: WebSocket, code: str, message: str) -> None:

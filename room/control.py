@@ -44,20 +44,33 @@ class ParticipantRemovalResult:
 class RoomControlModule:
     """Central control surface for room lifecycle and admin operations."""
 
+    DEFAULT_MAX_PARTICIPANTS = 10
+    DEFAULT_MAX_PARTICIPANTS_LIMIT = 100
+
     def __init__(
         self,
         manager: RoomManager,
         *,
-        default_max_participants: int = 10,
+        default_max_participants: int = DEFAULT_MAX_PARTICIPANTS,
+        max_participants_limit: int = DEFAULT_MAX_PARTICIPANTS_LIMIT,
         max_room_name_length: int = 64,
     ) -> None:
         self._manager = manager
         self._default_max_participants = default_max_participants
+        self._max_participants_limit = max_participants_limit
         self._max_room_name_length = max_room_name_length
 
     @property
     def manager(self) -> RoomManager:
         return self._manager
+
+    @property
+    def max_participants_limit(self) -> int:
+        return self._max_participants_limit
+
+    @max_participants_limit.setter
+    def max_participants_limit(self, value: int) -> None:
+        self._max_participants_limit = max(1, int(value))
 
     def validate_room_name(self, room_name: str) -> str:
         if not isinstance(room_name, str):
@@ -75,6 +88,10 @@ class RoomControlModule:
         value = self._default_max_participants if max_participants is None else max_participants
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise RoomControlError("max_participants must be a positive integer")
+        if value > self._max_participants_limit:
+            raise RoomControlError(
+                f"max_participants must be <= {self._max_participants_limit}"
+            )
         return value
 
     def create_room(
@@ -143,6 +160,10 @@ class RoomControlModule:
         for participant in list(room.participants):
             removed_participant_ids.append(participant.participant_id)
             self._manager.leave_room(participant)
+
+        # Leaving the last participant already destroys the room; this also covers
+        # rooms that were empty when close_room was called.
+        self._manager.destroy_room(room_name)
 
         return RoomCloseResult(
             room_id=room_name,

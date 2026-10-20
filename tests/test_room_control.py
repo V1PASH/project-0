@@ -91,6 +91,32 @@ class RoomControlModuleTests(unittest.TestCase):
         with self.assertRaises(RoomControlError):
             self.control.validate_max_participants(False)
 
+    def test_validate_max_participants_rejects_values_above_limit(self) -> None:
+        with self.assertRaises(RoomControlError):
+            self.control.validate_max_participants(
+                self.control.max_participants_limit + 1
+            )
+        self.assertEqual(
+            self.control.validate_max_participants(self.control.max_participants_limit),
+            self.control.max_participants_limit,
+        )
+
+    def test_custom_max_participants_limit_is_enforced(self) -> None:
+        control = RoomControlModule(self.manager, max_participants_limit=3)
+
+        with self.assertRaises(RoomControlError):
+            control.validate_max_participants(4)
+        self.assertEqual(control.validate_max_participants(3), 3)
+
+    def test_close_room_destroys_an_empty_room(self) -> None:
+        self.control.create_room("empty-room")
+
+        result = self.control.close_room("empty-room")
+
+        self.assertEqual(result.room_id, "empty-room")
+        self.assertEqual(result.removed_participant_ids, [])
+        self.assertIsNone(self.manager.get_room("empty-room"))
+
     def test_close_room_removes_all_participants(self) -> None:
         alice = self.manager.register_participant(websocket=object(), name="Alice")
         bob = self.manager.register_participant(websocket=object(), name="Bob")

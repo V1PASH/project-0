@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import time
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest.mock import patch
 import signaling.server as signaling_server
 from room.control import RoomControlModule
 from room.manager import RoomManager
+from room.model import RoomFullError
 from services.stt_providers import ProviderTranscript
 from services.stt_service import STTService
 
@@ -38,6 +40,23 @@ class FakeAudioProvider:
             is_final=True,
             source=self.name,
         )
+
+
+class FakeSocketWebSocket(FakeWebSocket):
+    """Websocket double that replays a scripted list of ASGI events."""
+
+    def __init__(self, events: list[dict] | None = None) -> None:
+        super().__init__()
+        self.accepted = False
+        self._events = list(events or [])
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def receive(self) -> dict:
+        if self._events:
+            return self._events.pop(0)
+        return {"type": "websocket.disconnect", "code": 1000}
 
 
 class SignalingServerTests(unittest.IsolatedAsyncioTestCase):
@@ -519,6 +538,192 @@ class SignalingServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ws.messages[-1]["type"], "error")
         self.assertEqual(ws.messages[-1]["code"], "not_in_room")
+
+    async def test_rejects_max_participants_above_limit(self) -> None:
+        ws = FakeWebSocket()
+        participant = signaling_server.manager.register_participant(ws, name="Alice")
+
+        await signaling_server._handle_message(
+            participant,
+            {
+                "type": "join_room",
+                "room_id": "huge-room",
+                "max_participants": signaling_server.MAX_ROOM_PARTICIPANTS + 1,
+            },
+        )
+
+        self.assertEqual(ws.messages[-1]["type"], "error")
+        self.assertEqual(ws.messages[-1]["code"], "invalid_max_participants")
+
+    async def test_create_room_does_not_leave_empty_room_behind_on_join_failure(self) -> None:
+        ws = FakeWebSocket()
+        participant = signaling_server.manager.register_participant(ws, name="Alice")
+
+        with patch.object(
+            signaling_server.room_control,
+            "join_participant",
+            side_effect=RoomFullError("room is full"),
+        ):
+            await signaling_server._handle_message(
+                participant,
+                {"type": "create_room", "room_id": "doomed-room"},
+            )
+
+        self.assertEqual(ws.messages[-1]["type"], "error")
+        self.assertEqual(ws.messages[-1]["code"], "room_full")
+        self.assertIsNone(signaling_server.manager.get_room("doomed-room"))
+
+
+class WebSocketEndpointTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        signaling_server.manager = RoomManager()
+        signaling_server.room_control = RoomControlModule(signaling_server.manager)
+        signaling_server.stt_service = STTService()
+
+    async def test_malformed_json_returns_error_and_keeps_connection_open(self) -> None:
+        ws = FakeSocketWebSocket(
+            [
+                {"type": "websocket.receive", "text": "this is not json"},
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps({"type": "join_room", "room_id": "ws-room"}),
+                },
+                {"type": "websocket.disconnect", "code": 1000},
+            ]
+        )
+
+        await signaling_server.websocket_endpoint(ws)
+
+        self.assertTrue(ws.accepted)
+        self.assertEqual(ws.messages[0]["type"], "connected")
+        self.assertEqual(ws.messages[1]["type"], "error")
+        self.assertEqual(ws.messages[1]["code"], "invalid_json")
+        self.assertEqual(ws.messages[2]["type"], "joined_room")
+
+    async def test_non_text_frame_returns_error_and_keeps_connection_open(self) -> None:
+        ws = FakeSocketWebSocket(
+            [
+                {"type": "websocket.receive", "bytes": b"\x00\x01"},
+                {"type": "websocket.disconnect", "code": 1000},
+            ]
+        )
+
+        await signaling_server.websocket_endpoint(ws)
+
+        self.assertEqual(ws.messages[1]["type"], "error")
+        self.assertEqual(ws.messages[1]["code"], "invalid_payload")
+
+    async def test_non_object_payload_returns_error(self) -> None:
+        ws = FakeSocketWebSocket(
+            [
+                {"type": "websocket.receive", "text": json.dumps(["not", "an", "object"])},
+                {"type": "websocket.disconnect", "code": 1000},
+            ]
+        )
+
+        await signaling_server.websocket_endpoint(ws)
+
+        self.assertEqual(ws.messages[1]["type"], "error")
+        self.assertEqual(ws.messages[1]["code"], "invalid_payload")
+
+    async def test_participant_is_unregistered_on_disconnect(self) -> None:
+        ws = FakeSocketWebSocket(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps({"type": "join_room", "room_id": "ws-room"}),
+                },
+                {"type": "websocket.disconnect", "code": 1000},
+            ]
+        )
+
+        await signaling_server.websocket_endpoint(ws)
+
+        self.assertEqual(signaling_server.manager.active_participant_count, 0)
+        self.assertIsNone(signaling_server.manager.get_room("ws-room"))
+
+
+class ConfigurationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._env_backup = {
+            key: os.environ.get(key)
+            for key in (
+                "REQUIRE_EXPLICIT_ROOM_CREATE",
+                "MAX_ROOM_PARTICIPANTS",
+                "ROOM_CREATE_TOKEN_TTL_SECONDS",
+            )
+        }
+
+    def tearDown(self) -> None:
+        for key, value in self._env_backup.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        signaling_server.reload_config()
+
+    def test_reload_config_reads_environment(self) -> None:
+        os.environ["REQUIRE_EXPLICIT_ROOM_CREATE"] = "true"
+        os.environ["MAX_ROOM_PARTICIPANTS"] = "7"
+        os.environ["ROOM_CREATE_TOKEN_TTL_SECONDS"] = "45"
+
+        signaling_server.reload_config()
+
+        self.assertTrue(signaling_server.REQUIRE_EXPLICIT_ROOM_CREATE)
+        self.assertEqual(signaling_server.MAX_ROOM_PARTICIPANTS, 7)
+        self.assertEqual(signaling_server.ROOM_CREATE_TOKEN_TTL_SECONDS, 45)
+
+    def test_reload_config_ignores_invalid_positive_int(self) -> None:
+        os.environ["MAX_ROOM_PARTICIPANTS"] = "not-a-number"
+
+        signaling_server.reload_config()
+
+        self.assertEqual(
+            signaling_server.MAX_ROOM_PARTICIPANTS,
+            RoomControlModule.DEFAULT_MAX_PARTICIPANTS_LIMIT,
+        )
+
+    def test_room_control_uses_configured_participant_limit(self) -> None:
+        os.environ["MAX_ROOM_PARTICIPANTS"] = "5"
+
+        signaling_server.reload_config()
+
+        self.assertEqual(signaling_server.room_control.max_participants_limit, 5)
+
+
+class WebClientAssetTests(unittest.TestCase):
+    def _packaged_asset_path(self) -> Path:
+        return (
+            Path(__file__).resolve().parents[1]
+            / "rtc_room_framework"
+            / "web"
+            / "index.html"
+        )
+
+    def test_served_index_matches_packaged_asset(self) -> None:
+        packaged = self._packaged_asset_path()
+        self.assertTrue(packaged.exists())
+
+        response = asyncio.run(signaling_server.index())
+
+        served_path = getattr(response, "path", None)
+        if served_path is not None:
+            self.assertEqual(Path(served_path).resolve(), packaged.resolve())
+            body = Path(served_path).read_text(encoding="utf-8")
+        else:
+            body = response.body.decode("utf-8")
+
+        self.assertEqual(body, packaged.read_text(encoding="utf-8"))
+
+    def test_web_root_override_is_not_a_second_copy(self) -> None:
+        web_root_index = Path(__file__).resolve().parents[1] / "web" / "index.html"
+        if not web_root_index.exists():
+            self.skipTest("No local web root override present")
+
+        self.assertEqual(
+            web_root_index.read_text(encoding="utf-8"),
+            self._packaged_asset_path().read_text(encoding="utf-8"),
+        )
 
 
 if __name__ == "__main__":

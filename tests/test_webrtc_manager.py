@@ -36,6 +36,15 @@ class RoomManagerTests(unittest.TestCase):
         self.assertEqual(agent.name, "Helper")
         self.assertEqual(agent.state, ParticipantState.CONNECTING)
 
+    def test_destroy_room_removes_room_regardless_of_occupancy(self) -> None:
+        participant = self.manager.register_participant(websocket=object(), name="Alice")
+        room = self.manager.get_or_create_room(room_id="doomed", creator_id=participant.participant_id)
+        self.manager.join_room(participant, room.room_id)
+
+        self.assertTrue(self.manager.destroy_room("doomed"))
+        self.assertIsNone(self.manager.get_room("doomed"))
+        self.assertFalse(self.manager.destroy_room("doomed"))
+
     def test_announces_join_and_leave_events(self) -> None:
         participant = self.manager.register_participant(websocket=object(), name="Alice")
         room = self.manager.join_room(participant, "room-events")

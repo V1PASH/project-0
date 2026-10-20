@@ -3,3 +3,8 @@ __pycache__/
 *.py[cod]
 .DS_Store
 venv/
+build/
+dist/
+*.egg-info/
+certs/*.key
+certs/*.pem

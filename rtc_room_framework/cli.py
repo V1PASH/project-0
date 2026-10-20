@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from typing import Sequence
 
 import uvicorn
@@ -19,6 +20,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--ssl-certfile", default=None, help="Path to SSL certificate file.")
     parser.add_argument("--ssl-keyfile", default=None, help="Path to SSL key file.")
     args = parser.parse_args(argv)
+
+    # Application entry point: make sure framework log records are visible.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
     app_target = _UVICORN_APP_FACTORY_IMPORT if args.reload else create_app()
     run_kwargs = {

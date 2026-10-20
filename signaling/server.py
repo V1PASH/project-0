@@ -8,11 +8,13 @@ import binascii
 import hashlib
 import hmac
 import importlib.resources
+import json
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -30,7 +32,6 @@ from services.stt_providers import build_stt_provider_from_env
 from services.stt_service import STTService, STTServiceError
 
 log = logging.getLogger(__name__)
-app = FastAPI(title="WebRTC Room Signaling")
 manager = RoomManager()
 room_control = RoomControlModule(manager)
 
@@ -55,25 +56,113 @@ def _read_positive_int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-stt_service = _build_stt_service()
-DEFAULT_STT_LANGUAGE_CODE = os.getenv("STT_LANGUAGE_CODE", "unknown").strip() or "unknown"
 MAX_STT_AUDIO_CHUNK_BYTES = 1024 * 1024 * 5
 MAX_ROOM_AUDIO_CHUNK_BYTES = 1024 * 1024
-ROOM_CREATE_API_KEY = os.getenv("ROOM_CREATE_API_KEY", "").strip()
-ROOM_CREATE_API_SECRET = os.getenv("ROOM_CREATE_API_SECRET", "").strip()
-ROOM_CREATE_TOKEN_TTL_SECONDS = _read_positive_int_env("ROOM_CREATE_TOKEN_TTL_SECONDS", 300)
-_require_create_room_auth_raw = os.getenv("REQUIRE_CREATE_ROOM_AUTH", "").strip().lower()
-if _require_create_room_auth_raw:
-    REQUIRE_CREATE_ROOM_AUTH = _require_create_room_auth_raw in {"1", "true", "yes", "on"}
-else:
-    REQUIRE_CREATE_ROOM_AUTH = bool(ROOM_CREATE_API_KEY and ROOM_CREATE_API_SECRET)
-REQUIRE_EXPLICIT_ROOM_CREATE = os.getenv("REQUIRE_EXPLICIT_ROOM_CREATE", "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
+
+stt_service: STTService
+DEFAULT_STT_LANGUAGE_CODE: str
+ROOM_CREATE_API_KEY: str
+ROOM_CREATE_API_SECRET: str
+ROOM_CREATE_TOKEN_TTL_SECONDS: int
+REQUIRE_CREATE_ROOM_AUTH: bool
+REQUIRE_EXPLICIT_ROOM_CREATE: bool
+MAX_ROOM_PARTICIPANTS: int
+
+
+def reload_config() -> None:
+    """Re-read environment-driven configuration from the process environment.
+
+    Called on import and again on server startup so that configuration set after
+    the module was imported is still honoured.
+    """
+    global stt_service
+    global DEFAULT_STT_LANGUAGE_CODE
+    global ROOM_CREATE_API_KEY
+    global ROOM_CREATE_API_SECRET
+    global ROOM_CREATE_TOKEN_TTL_SECONDS
+    global REQUIRE_CREATE_ROOM_AUTH
+    global REQUIRE_EXPLICIT_ROOM_CREATE
+    global MAX_ROOM_PARTICIPANTS
+
+    stt_service = _build_stt_service()
+    DEFAULT_STT_LANGUAGE_CODE = os.getenv("STT_LANGUAGE_CODE", "unknown").strip() or "unknown"
+    ROOM_CREATE_API_KEY = os.getenv("ROOM_CREATE_API_KEY", "").strip()
+    ROOM_CREATE_API_SECRET = os.getenv("ROOM_CREATE_API_SECRET", "").strip()
+    ROOM_CREATE_TOKEN_TTL_SECONDS = _read_positive_int_env("ROOM_CREATE_TOKEN_TTL_SECONDS", 300)
+
+    require_create_room_auth_raw = os.getenv("REQUIRE_CREATE_ROOM_AUTH", "").strip().lower()
+    if require_create_room_auth_raw:
+        REQUIRE_CREATE_ROOM_AUTH = require_create_room_auth_raw in {"1", "true", "yes", "on"}
+    else:
+        REQUIRE_CREATE_ROOM_AUTH = bool(ROOM_CREATE_API_KEY and ROOM_CREATE_API_SECRET)
+
+    REQUIRE_EXPLICIT_ROOM_CREATE = os.getenv("REQUIRE_EXPLICIT_ROOM_CREATE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    MAX_ROOM_PARTICIPANTS = _read_positive_int_env(
+        "MAX_ROOM_PARTICIPANTS", RoomControlModule.DEFAULT_MAX_PARTICIPANTS_LIMIT
+    )
+    room_control.max_participants_limit = MAX_ROOM_PARTICIPANTS
+
+
+reload_config()
+
+
+def _log_effective_config() -> None:
+    log.info(
+        "signaling config: stt_provider=%s stt_transport=%s "
+        "require_create_room_auth=%s require_explicit_room_create=%s max_room_participants=%d",
+        stt_service.provider_name,
+        "audio_chunk" if stt_service.uses_audio_provider else "browser_text",
+        REQUIRE_CREATE_ROOM_AUTH,
+        REQUIRE_EXPLICIT_ROOM_CREATE,
+        MAX_ROOM_PARTICIPANTS,
+    )
+
+
+StartupHook = Callable[[], Awaitable[None]]
+_shutdown_hooks: list[StartupHook] = []
+_startup_hooks: list[StartupHook] = []
+
+
+def register_startup_hook(hook: StartupHook) -> StartupHook:
+    """Register a coroutine to run when the server starts."""
+    if hook not in _startup_hooks:
+        _startup_hooks.append(hook)
+    return hook
+
+
+def register_shutdown_hook(hook: StartupHook) -> StartupHook:
+    """Register a coroutine to run when the server shuts down."""
+    if hook not in _shutdown_hooks:
+        _shutdown_hooks.append(hook)
+    return hook
+
+
+def clear_lifecycle_hooks() -> None:
+    """Remove all registered startup/shutdown hooks."""
+    _startup_hooks.clear()
+    _shutdown_hooks.clear()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    reload_config()
+    _log_effective_config()
+    for hook in tuple(_startup_hooks):
+        await hook()
+    try:
+        yield
+    finally:
+        for hook in tuple(reversed(_shutdown_hooks)):
+            await hook()
+
+
+app = FastAPI(title="WebRTC Room Signaling", lifespan=lifespan)
 
 
 class _CreateRoomAuthError(ValueError):
@@ -86,7 +175,10 @@ class _CreateRoomAuthError(ValueError):
 def _get_room_control() -> RoomControlModule:
     global room_control
     if room_control.manager is not manager:
-        room_control = RoomControlModule(manager)
+        room_control = RoomControlModule(
+            manager,
+            max_participants_limit=MAX_ROOM_PARTICIPANTS,
+        )
     return room_control
 
 
@@ -180,7 +272,19 @@ async def index():
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok", "stats": manager.stats()})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "stats": manager.stats(),
+            "config": {
+                "stt_provider": stt_service.provider_name,
+                "stt_transport": "audio_chunk" if stt_service.uses_audio_provider else "browser_text",
+                "require_create_room_auth": REQUIRE_CREATE_ROOM_AUTH,
+                "require_explicit_room_create": REQUIRE_EXPLICIT_ROOM_CREATE,
+                "max_room_participants": MAX_ROOM_PARTICIPANTS,
+            },
+        }
+    )
 
 
 @app.websocket("/ws")
@@ -201,18 +305,44 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     try:
         while True:
-            payload = await websocket.receive_json()
+            event = await websocket.receive()
+            if event.get("type") == "websocket.disconnect":
+                break
+
+            text = event.get("text")
+            if text is None:
+                await _send_error(
+                    websocket,
+                    "invalid_payload",
+                    "Only text frames are supported",
+                )
+                continue
+
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                await _send_error(
+                    websocket,
+                    "invalid_json",
+                    "Message must be valid JSON",
+                )
+                continue
+
             if not isinstance(payload, dict):
                 await _send_error(websocket, "invalid_payload", "Payload must be a JSON object")
                 continue
+
             await _handle_message(participant, payload)
     except WebSocketDisconnect:
-        stt_service.clear_participant(participant.participant_id)
-        manager.unregister_participant(websocket)
+        pass
     except Exception:
+        log.exception(
+            "WebSocket loop failed for participant %s", participant.participant_id
+        )
+        raise
+    finally:
         stt_service.clear_participant(participant.participant_id)
         manager.unregister_participant(websocket)
-        raise
 
 
 async def _handle_message(participant: Participant, payload: dict[str, Any]) -> None:
@@ -286,11 +416,11 @@ async def _handle_join_or_create_room(
 
     try:
         max_participants = control.validate_max_participants(payload.get("max_participants"))
-    except RoomControlError:
+    except RoomControlError as exc:
         await _send_error(
             participant.websocket,
             "invalid_max_participants",
-            "max_participants must be a positive integer",
+            str(exc),
         )
         return
 
@@ -327,9 +457,15 @@ async def _handle_join_or_create_room(
         await _send_error(participant.websocket, "room_not_found", f"Room does not exist: {room_id}")
         return
     except RoomFullError:
+        if room_was_created:
+            # The room was created for this participant but could not be joined;
+            # do not leave an empty room behind.
+            _discard_created_room(control, room_id)
         await _send_error(participant.websocket, "room_full", f"Room is full: {room_id}")
         return
     except RoomControlError as exc:
+        if room_was_created:
+            _discard_created_room(control, room_id)
         await _send_error(participant.websocket, "invalid_room_id", str(exc))
         return
 
@@ -346,6 +482,14 @@ async def _handle_join_or_create_room(
             "join_source": "create_room" if create_only else "join_room",
         }
     )
+
+
+def _discard_created_room(control: RoomControlModule, room_id: str) -> None:
+    """Best-effort cleanup for a room that was created but could not be joined."""
+    try:
+        control.close_room(room_id)
+    except RoomControlError:
+        log.warning("Failed to discard newly created room %s", room_id)
 
 
 async def _handle_leave_room(participant: Participant) -> None:

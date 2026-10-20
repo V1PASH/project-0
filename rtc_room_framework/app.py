@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import importlib
-from typing import Any, cast
+from typing import Any, Awaitable, Callable, cast
 
 from fastapi import FastAPI
 
 from room.control import RoomControlModule
 from room.manager import RoomManager
 from services.stt_service import STTService
+
+LifecycleHook = Callable[[], Awaitable[None]]
 
 
 def _load_signaling_server_module() -> Any:
@@ -71,3 +73,30 @@ class RTCRoomFramework:
     @property
     def room_control(self) -> RoomControlModule:
         return get_room_control()
+
+
+def register_startup_hook(hook: LifecycleHook) -> LifecycleHook:
+    """Register a coroutine that runs when the signaling server starts."""
+    module = _load_signaling_server_module()
+    register = getattr(module, "register_startup_hook", None)
+    if not callable(register):
+        raise RuntimeError("signaling.server.register_startup_hook is not available")
+    return cast(LifecycleHook, register(hook))
+
+
+def register_shutdown_hook(hook: LifecycleHook) -> LifecycleHook:
+    """Register a coroutine that runs when the signaling server shuts down."""
+    module = _load_signaling_server_module()
+    register = getattr(module, "register_shutdown_hook", None)
+    if not callable(register):
+        raise RuntimeError("signaling.server.register_shutdown_hook is not available")
+    return cast(LifecycleHook, register(hook))
+
+
+def reload_config() -> None:
+    """Re-read environment-driven configuration from the process environment."""
+    module = _load_signaling_server_module()
+    reload_fn = getattr(module, "reload_config", None)
+    if not callable(reload_fn):
+        raise RuntimeError("signaling.server.reload_config is not available")
+    reload_fn()

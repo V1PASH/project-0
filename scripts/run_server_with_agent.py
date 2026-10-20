@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -12,7 +13,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from rtc_room_framework import AgentSession, EchoTranscriptResponder, create_app, get_manager, get_room_control
+from rtc_room_framework import (
+    AgentSession,
+    EchoTranscriptResponder,
+    create_app,
+    get_manager,
+    get_room_control,
+    register_shutdown_hook,
+    register_startup_hook,
+)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -34,6 +43,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--ssl-keyfile", default=None, help="Path to SSL key file.")
     args = parser.parse_args(argv)
 
+    # Application entry point: make sure framework log records are visible.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+
     app = create_app()
     manager = get_manager()
     room_control = get_room_control()
@@ -45,7 +57,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         respond_to_interim=args.respond_to_interim,
     )
 
-    @app.on_event("startup")
     async def _start_agent() -> None:
         await agent_session.start(
             args.room_id,
@@ -53,9 +64,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             create_if_missing=args.create_room,
         )
 
-    @app.on_event("shutdown")
     async def _stop_agent() -> None:
         await agent_session.stop()
+
+    register_startup_hook(_start_agent)
+    register_shutdown_hook(_stop_agent)
 
     uvicorn.run(
         app,

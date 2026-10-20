@@ -429,6 +429,16 @@ class RoomManager:
             participant.transition(ParticipantState.CONNECTING)
         return room
 
+    def destroy_room(self, room_id: str, triggered_by: Optional[Participant] = None) -> bool:
+        """Destroy a room regardless of occupancy.
+
+        Returns True when a room existed and was removed.
+        """
+        if room_id not in self._rooms:
+            return False
+        self._destroy_room(room_id, triggered_by=triggered_by)
+        return True
+
     def _destroy_room(self, room_id: str, triggered_by: Optional[Participant] = None) -> None:
         room = self._rooms.pop(room_id, None)
         if room is None:

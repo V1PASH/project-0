@@ -1,5 +1,28 @@
 # RTC Room Framework
 
+> **Archived.** This prototype has been superseded by
+> [nitpick](https://github.com/V1PASH/nitpick) — the voice-agent framework
+> that carries this project's rooms and signaling architecture, with the
+> fixes below applied.
+>
+> The rooms, the room event bus, the participant model and the WebSocket
+> signaling protocol all live in nitpick now:
+>
+> * `nitpick/rooms/` — `Room`, `Participant`, `RoomManager`, `RoomControlModule`
+> * `nitpick/signaling/` — the FastAPI server and the wire protocol
+> * `nitpick/transport/` — `RoomTransport`, `ChannelTransport`, `WebRtcTransport`
+>
+> What changed in the port: a full room now reports `room_full` rather than
+> `room_not_found`; joining a room no longer silently resets its capacity;
+> there is a `room_interrupt` message so a client can stop playing when the
+> user barges in; the server advertises its audio output sample rate; and
+> there is a raw-PCM streaming path (`audio_pcm`) alongside the batch
+> WebM chunks.
+>
+> Use [nitpick](https://github.com/V1PASH/nitpick) and
+> [nitpick-core](https://github.com/V1PASH/nitpick-core) instead. This
+> repository is kept for history.
+
 WebRTC room signaling server with a browser test client, speaking events, STT pipeline, and optional in-process agent participant.
 
 ## Prerequisites

@@ -8,3 +8,8 @@ dist/
 *.egg-info/
 certs/*.key
 certs/*.pem
+
+# Scratch databases from local experiments.
+*.db
+*.db-shm
+*.db-wal
